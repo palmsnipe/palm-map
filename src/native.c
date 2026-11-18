@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "zlib.h"
+#include "vector.h"
 
 typedef unsigned char Byte;
 typedef unsigned int Word;
@@ -70,12 +71,68 @@ static void release(voidpf unused, voidpf ptr)
 
 static Word crc(const Byte *p, Word size)
 {
+    static const Word nibble[16] = {
+        0x00000000, 0x1db71064, 0x3b6e20c8, 0x26d930ac,
+        0x76dc4190, 0x6b6b51f4, 0x4db26158, 0x5005713c,
+        0xedb88320, 0xf00f9344, 0xd6d6a3e8, 0xcb61b38c,
+        0x9b64c2b0, 0x86d3d2d4, 0xa00ae278, 0xbdbdf21c
+    };
     Word v = ~0u;
     while (size--) {
         v ^= *p++;
-        for (unsigned i = 0; i < 8; i++) v = (v >> 1) ^ (0xedb88320u & (0u - (v & 1u)));
+        v = (v >> 4) ^ nibble[v & 15];
+        v = (v >> 4) ^ nibble[v & 15];
     }
     return ~v;
+}
+
+static Word le32(const Byte *p)
+{
+    return (Word)p[3] << 24 | (Word)p[2] << 16 | (Word)p[1] << 8 | p[0];
+}
+
+Word VectorUnpack(const Byte *data, Word size, Byte *out, Word capacity, Byte *scratch)
+{
+    if (size < 2 || data[0] != 0x1f || data[1] != 0x8b) {
+        if (size > capacity) return 0;
+        memcpy(out, data, size);
+        return size;
+    }
+    if (size < 18 || data[2] != 8 || (data[3] & 0xe0)) return 0;
+    const Byte *at = data + 10, *end = data + size - 8;
+    unsigned flags = data[3];
+    if (flags & 4) {
+        if (end - at < 2) return 0;
+        unsigned n = at[0] | ((unsigned)at[1] << 8);
+        at += 2;
+        if (n > (unsigned)(end - at)) return 0;
+        at += n;
+    }
+    for (unsigned bit = 8; bit <= 16; bit <<= 1) {
+        if (!(flags & bit)) continue;
+        while (at < end && *at) ++at;
+        if (at == end) return 0;
+        ++at;
+    }
+    if (flags & 2) {
+        if (end - at < 2 || (crc(data, (Word)(at - data)) & 0xffff) !=
+            (Word)(at[0] | ((Word)at[1] << 8))) return 0;
+        at += 2;
+    }
+    Word expected = le32(end + 4);
+    if (!expected || expected > capacity) return 0;
+    Arena arena = {scratch, SCRATCH_BYTES};
+    z_stream z = {0};
+    z.zalloc = alloc; z.zfree = release; z.opaque = &arena;
+    z.next_in = (Byte *)at;
+    z.avail_in = (Word)(end - at);
+    z.next_out = out;
+    z.avail_out = expected;
+    if (inflateInit2(&z, -15) != Z_OK) return 0;
+    int status = inflate(&z, Z_FINISH);
+    inflateEnd(&z);
+    return status == Z_STREAM_END && !z.avail_in && z.total_out == expected &&
+        crc(out, expected) == le32(end) ? expected : 0;
 }
 
 typedef struct {
@@ -259,11 +316,30 @@ int MapDecode(const Byte *d, Word n, Byte *p, Word stride, Byte *scratch)
 Word __attribute__((section(".entry"))) MapNative(void *emu, Byte *args, void *callback)
 {
     (void)emu; (void)callback;
-    if (be32(args)==1) return project(args);
-    if (be32(args)!=0) return 0;
-    Byte *bands[4];
+    Word command = be32(args);
+    if (command == nativeProject) return project(args);
+    const Byte *data = (const Byte *)be32(args+4);
+    Word size = be32(args+8);
+    if (command == nativeVectorUnpack)
+        return VectorUnpack(data,size,(Byte *)be32(args+12),be32(args+16),
+            (Byte *)be32(args+20));
+    if (command == nativeVectorLabels) {
+        VectorReadLabels(data,size,(Byte *)be32(args+12),be32(args+16),
+            be32(args+20),be32(args+24),(VectorLabels *)be32(args+28),(const void *)be32(args+32));
+        return 1;
+    }
+    if (command == nativeIndexLabels)
+        return VectorIndexLabels(data,size,(Byte *)be32(args+12),(void *)be32(args+16));
+    if (command == nativeLabelBitmap) {
+        MapLabelBitmap((const MapGlyph *)data,(const char *)size,(Byte *)be32(args+12),
+            be32(args+16),be32(args+20),(int)be32(args+24),(int)be32(args+28),be32(args+32));
+        return 1;
+    }
+    Byte *bands[4], *scratch = (Byte *)be32(args+28);
     for (unsigned i=0;i<4;++i) bands[i]=(Byte *)be32(args+12+i*4);
-    return decode((const Byte *)be32(args+4),be32(args+8),bands,512,
-                  (Byte *)be32(args+28),be32(args+32));
+    if (command == nativeVectorDraw)
+        return VectorDraw(data,size,bands,scratch,be32(args+32),be32(args+36),be32(args+40));
+    if (command == nativePng) return decode(data,size,bands,512,scratch,be32(args+32));
+    return 0;
 }
 #endif

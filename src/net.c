@@ -124,7 +124,7 @@ static Boolean ValidValidator(const Char *s)
     return true;
 }
 
-Boolean MapNetStart(MapNet *n, const Char *url, const CacheMeta *cached, Boolean forceTls12)
+Boolean MapNetStart(MapNet *n, const Char *url, const CacheMeta *cached, Boolean forceTls12, Boolean vector)
 {
     MapNetStop(n,false);
     n->error=NULL;
@@ -134,7 +134,7 @@ Boolean MapNetStart(MapNet *n, const Char *url, const CacheMeta *cached, Boolean
     }
     if (!StartLibraries(n,forceTls12)) return false;
     n->requestLength=HttpBuildGetRequestEx(&n->url,0,NULL,false,
-        "PalmMap/0.1.5 (+https://github.com/palmsnipe)",false,
+        "PalmMap/0.1.9 (+https://github.com/palmsnipe)",vector,
         n->request,sizeof(n->request));
     if (!n->requestLength) { Failed(n,"Tile URL is too long",0); return false; }
     n->conditional=false;
@@ -155,6 +155,8 @@ Boolean MapNetStart(MapNet *n, const Char *url, const CacheMeta *cached, Boolean
     MemSet(&n->response,sizeof(n->response),0);
     HttpParserInit(&n->parser,0,Collect,n);
     n->parser.headerProcP=CollectHeader;
+    n->parser.acceptGzip=vector;
+    n->vector=vector;
     n->deadline=TimGetTicks() + 24UL*SysTicksPerSecond();
     n->phase=netDns;
     return true;
@@ -298,8 +300,9 @@ UInt16 MapNetStep(MapNet *n)
     if (!n->parser.connectionComplete && (r.transferred || r.status==palmTlsStatusWouldBlock))
         return requestBusy;
     if (HttpParserFinish(&n->parser)!=httpOk ||
-        StrCaselessCompare(n->parser.contentType,"image/png") || !n->length)
-        return Failed(n,"Tile is not a PNG",0);
+        !n->length || StrCaselessCompare(n->parser.contentType,
+            n->vector ? "application/vnd.mapbox-vector-tile" : "image/png"))
+        return Failed(n,"Unexpected tile format",0);
     MapNetStop(n,true);
     return requestReady;
 }

@@ -16,7 +16,7 @@ typedef struct {
 } MapResponseHeaders;
 
 typedef struct {
-    Boolean tlsOpen, tlsLoaded, netOpen, netLoaded, conditional;
+    Boolean tlsOpen, tlsLoaded, netOpen, netLoaded, conditional, vector;
     UInt16 tls, net, phase, code, protocol;
     UInt32 options, session, deadline, length;
     UInt16 requestLength, written;
@@ -35,7 +35,7 @@ typedef struct {
     const Char *error;
 } MapNet;
 
-Boolean MapNetStart(MapNet *n, const Char *url, const CacheMeta *cached, Boolean forceTls12);
+Boolean MapNetStart(MapNet *n, const Char *url, const CacheMeta *cached, Boolean forceTls12, Boolean vector);
 UInt16 MapNetStep(MapNet *n);
 void MapNetStop(MapNet *n, Boolean completed);
 void MapNetClose(MapNet *n);

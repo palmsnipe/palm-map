@@ -35,6 +35,10 @@ ABI_FLAGS := -Wno-multichar -m68000 -mno-align-int -mpcrel -fpic \
 CFLAGS := $(ABI_FLAGS) -std=gnu17 -Os -Wall -Wextra -Wno-unused-parameter \
 	-Wno-old-style-declaration -MMD -MP -ffunction-sections -fdata-sections \
 	-I$(ROOT)/resources -I$(ROOT)/vendor -DPALMOS $(SDK_INCLUDES)
+ifneq ($(VECTOR_BENCH),)
+CFLAGS += -DMAP_VECTOR_BENCH
+endif
+
 LDFLAGS := $(ABI_FLAGS) -Os -nostartfiles -Wl,--gc-sections \
 	-Wl,-T,$(ROOT)/linker.lkr -Wl,-Map,$(BUILD_DIR)/$(APP_ID).map
 
@@ -84,7 +88,7 @@ test: $(PRC) test-native
 test-native: $(BUILD_DIR)/native-test
 	"$(BUILD_DIR)/native-test" data/world3-18.png
 
-$(BUILD_DIR)/native-test: src/native.c tests/native_test.c | $(BUILD_DIR)
+$(BUILD_DIR)/native-test: src/native.c src/vector.c src/labeltext.c tests/native_test.c | $(BUILD_DIR)
 	$(HOST_CC) -std=c17 -Wall -Wextra -Werror -DMAP_HOST_TEST $^ -lz -o $@
 
 HOST_CC ?= cc
@@ -102,10 +106,16 @@ ARM_ABI := -march=armv4t -marm -mfloat-abi=soft
 ARM_FLAGS := $(ARM_ABI) -Os -std=gnu17 -Wall -Wextra -ffreestanding -fno-builtin \
 	-fpie -ffunction-sections -fdata-sections -MMD -MP -DZ_SOLO -DNO_GZIP \
 	-Ivendor/zlib -fno-unwind-tables -fno-asynchronous-unwind-tables
-ARM_OBJECTS := $(addprefix $(BUILD_DIR)/arm-,native.o adler32.o inffast.o inflate.o inftrees.o zutil.o)
+ARM_OBJECTS := $(addprefix $(BUILD_DIR)/arm-,native.o vector.o labeltext.o adler32.o inffast.o inflate.o inftrees.o zutil.o)
 
 $(BUILD_DIR)/arm-native.o: src/native.c | $(BUILD_DIR)
 	$(ARM)gcc $(ARM_FLAGS) -c $< -o $@
+
+$(BUILD_DIR)/arm-labeltext.o: src/labeltext.c | $(BUILD_DIR)
+	$(ARM)gcc $(ARM_FLAGS) -O2 -c $< -o $@
+
+$(BUILD_DIR)/arm-vector.o: src/vector.c Makefile | $(BUILD_DIR)
+	$(ARM)gcc $(ARM_FLAGS) -O2 -c $< -o $@
 
 $(BUILD_DIR)/arm-%.o: vendor/zlib/%.c | $(BUILD_DIR)
 	$(ARM)gcc $(ARM_FLAGS) -c $< -o $@

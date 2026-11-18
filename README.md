@@ -1,7 +1,7 @@
 # Map for Palm OS 5
 
-Map is a raster OpenStreetMap viewer for Palm OS 5 on ARM handhelds. It uses
-Palm's native forms through PACE; PNG decoding, tile color conversion and
+Map is an OpenStreetMap viewer for Palm OS 5 on ARM handhelds. It uses
+Palm's native forms through PACE. PNG decoding, vector rendering and
 coordinate projection run in an ARMv4T ARMlet. Fixed Graffiti areas and
 Palm OS dynamic input areas both work.
 
@@ -19,6 +19,16 @@ select a result, and tap **Show on map**. Open the **Layers** menu and tap a lay
   authorized provider or your own server, with an HTTPS URL such as
   `https://maps.example.org/{z}/{x}/{y}.png`, non-interlaced 256 × 256 PNG tiles,
   and a domain certificate trusted by the bundled GlobalSign/ISRG roots.
+- **Shortbread**: live OpenStreetMap vector tiles with a compact style for
+  land, water, streets and building footprints. Street names appear from
+  zoom 10 where supplied. Named landmarks such as towers, museums, and
+  historic sites appear from zoom 14. Labels use Palm font glyphs at native
+  pixel size. Street names follow their road segment, and landmark names
+  stay horizontal. Labels avoid other labels, the search pin, and the zoom
+  buttons. At display zooms 15–19, the app reuses a level 14 source tile and
+  its label index.
+  See the [Shortbread schema](https://shortbread-tiles.org/schema/1.0/)
+  and the [OSM vector tile policy](https://operations.osmfoundation.org/policies/vector/).
 
 Map opens on Streets and restores the saved viewport and marker. The tile cache is bounded
 to about 3 MiB and uses server expiry and validators. Map only requests tiles
@@ -81,7 +91,7 @@ make PALM_TOOLCHAIN_ROOT=../palm-toolchain test
 ```
 
 This builds `build/Map.prc`, checks the package and runs host tests for indexed
-PNG, corrupt tiles, the bundled atlas and Mercator projection. The checked-in
+PNG, corrupt tiles, the bundled atlas, Mercator projection, gzip, vector overzoom, indexed labels and rotated text. The checked-in
 map assets are ready to build. To regenerate them, download the sources from
 [THIRD_PARTY.md](THIRD_PARTY.md), install ImageMagick 7, and run
 `python3 tools/assets.py data /path/to/countries.geojson /path/to/cities15000.zip`.
@@ -115,3 +125,40 @@ default TLS 1.2 setting. The E2 check covered the Find and Layers menu items
 and an update from 0.1.1 with a saved layer, zoom level, and marker. The TX
 check covered both zoom controls with the input area closed and checked their
 position with the input area open.
+
+Map 0.1.6 loaded live Shortbread tiles over TLS 1.2 on CloudpilotEmu's
+Tungsten E2 at the default 100 MIPS. At Parliament Hill, the ARMlet took an
+average of 200 ms per tile at zoom 14 (four tiles, 260 ms maximum) and
+80 ms per tile at zoom 19 (four tiles, 80 ms maximum). The zoom 19 pass
+reused a decompressed source tile in RAM. These timings cover drawing the
+256 × 256 tiles in the ARMlet. The benchmark measures decompression separately
+and excludes download, bitmap allocation and screen updates. To reproduce the
+timing overlay, build with `make BUILD_DIR="$PWD/build/vector-bench" VECTOR_BENCH=1`.
+
+Map 0.1.7 was tested at the same Parliament Hill coordinates on the
+emulated Tungsten E2 at 100 MIPS. Times are averages over four 256 × 256
+tiles at each zoom. Label selection and painting are measured once per
+viewport redraw, separately from the ARMlet.
+
+| Zoom | Geometry in the ARMlet | Label extraction in the ARMlet | Viewport labels |
+| --- | ---: | ---: | ---: |
+| 14 | 202 ms/tile | 52 ms/tile | 20 ms, 8 labels |
+| 19 | 87 ms/tile | 42 ms/tile | 0 ms, no anchors in the centered view |
+
+Panning toward Peace Tower at zoom 19 rendered its name and point marker.
+Palm OS reports timings in 10 ms ticks. Network transfer and screen
+blitting are outside these timings.
+
+Map 0.1.8 repeated the test at Parliament Hill on the emulated Tungsten E2
+at 100 MIPS. Four visible tiles were timed at each zoom. Times use Palm OS
+ticks at 100 Hz.
+
+| Zoom | Geometry | Label extraction | Final viewport label pass |
+| --- | ---: | ---: | ---: |
+| 14 | 165 ms/tile | 35 ms/tile | 20 ms for eight labels |
+| 19 | 80 ms/tile | Under 10 ms/tile | 10 ms for one label after panning to Peace Tower |
+
+The first overzoom built the label index for the Parliament Hill source tile
+in 80 ms. The zoom 19 tile measurement reused that index. Tile download,
+inflation, and screen bitmap blitting were measured separately or outside
+these figures.

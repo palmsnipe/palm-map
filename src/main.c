@@ -4,6 +4,8 @@
 #include <PenInputMgr.h>
 #include "resource.h"
 #include "map.h"
+#include "memory.h"
+#include "vector.h"
 #include "net.h"
 
 #define ARM_RESOURCE 1000
@@ -23,7 +25,10 @@
 #define SOURCE_MAX 150
 #define OSM "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
 
-enum { streets, night, overview, custom };
+#define SHORTBREAD "https://vector.openstreetmap.org/shortbread_v1/{z}/{x}/{y}.mvt"
+#define VECTOR_SOURCE 0x26f02d41UL
+
+enum { streets, night, overview, custom, shortbread };
 typedef struct {
     UInt32 x,y,markX,markY;
     UInt8 z,layer;
@@ -36,6 +41,7 @@ typedef struct {
     BitmapType *base[4],*dense[4];
     UInt32 used;
     CacheMeta meta;
+    VectorLabels *labels;
     Boolean fallback;
 } Tile;
 
@@ -55,7 +61,20 @@ typedef struct {
     MapNet net;
     TileCache cache;
     Tile tiles[SLOTS];
-    TileKey loading;
+    TileKey loading, vectorKey;
+    CacheMeta vectorMeta;
+    UInt8 *vectorData;
+    UInt32 vectorSize;
+    void *labelIndex;
+    Boolean indexReady, indexTried, labelPainterTried;
+    BitmapType *labelBase, *labelBitmap;
+    UInt8 *labelPixels, labelKey, labelHalo, labelStreet, labelLandmark;
+    MapGlyph *glyphs;
+#ifdef MAP_VECTOR_BENCH
+    UInt32 unpackTicks, renderTicks, peakTicks, rendered;
+    UInt32 indexTicks, extractTicks, overlayTicks;
+    UInt16 labelCount;
+#endif
     MemHandle arm;
     NativeFuncType *native;
     UInt8 *scratch;
@@ -84,6 +103,7 @@ static void Destroy(Tile *t)
         if (t->dense[i]) BmpDelete(t->dense[i]);
         if (t->base[i]) BmpDelete(t->base[i]);
     }
+    if (t->labels) MemPtrFree(t->labels);
     MemSet(t,sizeof(*t),0);
 }
 
@@ -104,7 +124,7 @@ static Tile *Vacant(App *a)
     return t;
 }
 
-static Boolean Decode(App *a, TileKey k, const UInt8 *png, UInt32 n,
+static Boolean Decode(App *a, TileKey k, const UInt8 *data, UInt32 n,
     Boolean fallback, const CacheMeta *meta)
 {
     Tile next;
@@ -113,8 +133,17 @@ static Boolean Decode(App *a, TileKey k, const UInt8 *png, UInt32 n,
     if (!t) t=Vacant(a);
     if (t->base[0] && !SameTile(t->key,k)) Destroy(t);
     // Some 5.x ROMs cannot allocate a single 128 KiB BmpCreate bitmap.
-    UInt32 args[9]={0,(UInt32)png,n,0,0,0,0,(UInt32)a->scratch,
+    UInt32 args[11]={nativePng,(UInt32)data,n,0,0,0,0,(UInt32)a->scratch,
         a->view.layer==night && !fallback};
+    Boolean vector=a->view.layer==shortbread;
+    if (vector) {
+        UInt16 shift=k.z>SHORTBREAD_MAX_Z ? k.z-SHORTBREAD_MAX_Z : 0;
+        UInt32 mask=(1UL<<shift)-1;
+        args[0]=nativeVectorDraw;
+        args[8]=shift;
+        args[9]=k.x&mask;
+        args[10]=k.y&mask;
+    }
     for (UInt16 i=0;i<4;++i) {
         UInt16 err=0,stride=0;
         Coord w,h;
@@ -129,7 +158,48 @@ static Boolean Decode(App *a, TileKey k, const UInt8 *png, UInt32 n,
             if (!next.dense[i]) goto failed;
         }
     }
+#ifdef MAP_VECTOR_BENCH
+    UInt32 started=TimGetTicks();
+#endif
     if (!PceNativeCall(a->native,args)) goto failed;
+#ifdef MAP_VECTOR_BENCH
+    if (vector) {
+        UInt32 elapsed=TimGetTicks()-started;
+        a->renderTicks+=elapsed;
+        if (elapsed>a->peakTicks) a->peakTicks=elapsed;
+        ++a->rendered;
+    }
+#endif
+    if (vector && k.z>=VECTOR_LABEL_MIN_Z) {
+        next.labels=MemPtrNew(sizeof(*next.labels));
+        if (next.labels) {
+            if (args[8] && !a->indexTried) {
+                a->indexTried=true;
+#ifdef MAP_VECTOR_BENCH
+                started=TimGetTicks();
+#endif
+                if (!a->labelIndex) a->labelIndex=MapAlloc(VECTOR_INDEX_CAPACITY);
+                if (a->labelIndex) {
+                    UInt32 index[]={nativeIndexLabels,(UInt32)data,n,(UInt32)a->scratch,
+                        (UInt32)a->labelIndex};
+                    a->indexReady=PceNativeCall(a->native,index)!=0;
+                }
+#ifdef MAP_VECTOR_BENCH
+                a->indexTicks+=TimGetTicks()-started;
+#endif
+            }
+            UInt32 labels[]={nativeVectorLabels,(UInt32)data,n,(UInt32)a->scratch,
+                args[8],args[9],args[10],(UInt32)next.labels,
+                a->indexReady ? (UInt32)a->labelIndex : 0};
+#ifdef MAP_VECTOR_BENCH
+            started=TimGetTicks();
+#endif
+            PceNativeCall(a->native,labels);
+#ifdef MAP_VECTOR_BENCH
+            a->extractTicks+=TimGetTicks()-started;
+#endif
+        }
+    }
     Destroy(t);
     next.key=k; next.fallback=fallback; next.used=++a->useCount;
     if (meta) next.meta=*meta;
@@ -154,13 +224,53 @@ static Boolean LoadOverview(App *a, TileKey k)
     return ok;
 }
 
+static TileKey ParentKey(TileKey k)
+{
+    if (k.z>SHORTBREAD_MAX_Z) {
+        UInt16 shift=k.z-SHORTBREAD_MAX_Z;
+        k.x>>=shift;
+        k.y>>=shift;
+        k.z=SHORTBREAD_MAX_Z;
+    }
+    return k;
+}
+
+static Boolean UnpackVector(App *a, TileKey parent, const UInt8 *data, UInt32 size,
+    const CacheMeta *meta)
+{
+    if (!a->vectorData) a->vectorData=MapAlloc(VECTOR_CAPACITY);
+    if (!a->vectorData) return false;
+    UInt32 args[]={nativeVectorUnpack,(UInt32)data,size,(UInt32)a->vectorData,
+        VECTOR_CAPACITY,(UInt32)a->scratch};
+#ifdef MAP_VECTOR_BENCH
+    UInt32 started=TimGetTicks();
+#endif
+    a->vectorSize=PceNativeCall(a->native,args);
+#ifdef MAP_VECTOR_BENCH
+    a->unpackTicks=TimGetTicks()-started;
+#endif
+    a->indexReady=a->indexTried=false;
+    a->vectorKey=parent;
+    a->vectorMeta=*meta;
+    return a->vectorSize!=0;
+}
+
 static Boolean LoadCached(App *a, TileKey k)
 {
+    Boolean vector=a->view.layer==shortbread;
+    TileKey parent=vector ? ParentKey(k) : k;
     UInt32 bytes;
     CacheMeta meta;
-    UInt8 *data=CacheRead(&a->cache,k,&bytes,&meta);
+    UInt8 *data=CacheRead(&a->cache,parent,&bytes,&meta);
     if (!data) return false;
-    Boolean ok=Decode(a,k,data,bytes,false,&meta);
+    Boolean ok;
+    if (vector) {
+        ok=UnpackVector(a,parent,data,bytes,&meta) &&
+            Decode(a,k,a->vectorData,a->vectorSize,false,&meta);
+        if (!ok) a->vectorSize=0;
+    } else {
+        ok=Decode(a,k,data,bytes,false,&meta);
+    }
     MemPtrFree(data);
     return ok;
 }
@@ -212,9 +322,129 @@ static void Fill(Coord x, Coord y, Coord w, Coord h, IndexedColorType color)
     WinPaintRectangle(&rect,0);
 }
 
-static void DrawMarker(App *a)
+static UInt8 GlyphIndex(UInt8 ch) { return ch>=32 ? ch-32 : 0; }
+
+static void FreeLabelPainter(App *a)
 {
-    if (!a->view.pin) return;
+    if (a->labelBitmap) BmpDelete(a->labelBitmap);
+    if (a->labelBase) BmpDelete(a->labelBase);
+    if (a->glyphs) MemPtrFree(a->glyphs);
+    a->labelBitmap=a->labelBase=NULL;
+    a->glyphs=NULL;
+    a->labelPixels=NULL;
+}
+
+static void PrepareLabelPainter(App *a)
+{
+    if (a->labelPainterTried) return;
+    a->labelPainterTried=true;
+    UInt16 err=0, stride=0;
+    BitmapType *glyph=BmpCreate(16,MAP_GLYPH_HEIGHT,1,NULL,&err);
+    if (!glyph) return;
+    WinHandle buffer=WinCreateBitmapWindow(glyph,&err);
+    if (!buffer) {
+        BmpDelete(glyph);
+        return;
+    }
+    a->glyphs=MemPtrNew(MAP_GLYPH_COUNT*sizeof(*a->glyphs));
+    if (a->glyphs) {
+        WinPushDrawState();
+        WinHandle oldWin=WinSetDrawWindow(buffer);
+        UInt16 oldCoord=WinSetCoordinateSystem(kCoordinatesStandard);
+        WinResetClip();
+        WinSetBackColor(0);
+        WinSetTextColor(1);
+        FntSetFont(boldFont);
+        const UInt8 *bits=BmpGetBits(glyph);
+        BmpGetDimensions(glyph,NULL,NULL,&stride);
+        for (UInt16 ch=32;ch<256;++ch) {
+            MapGlyph *g=a->glyphs+GlyphIndex((UInt8)ch);
+            Char text=(Char)ch;
+            g->width=FntCharsWidth(&text,1);
+            if (g->width>16) g->width=16;
+            WinEraseWindow();
+            if (ch>32) WinDrawChars(&text,1,0,0);
+            for (UInt16 y=0;y<MAP_GLYPH_HEIGHT;++y) {
+                g->rows[y][0]=bits[y*stride];
+                g->rows[y][1]=bits[y*stride+1];
+            }
+        }
+        WinSetCoordinateSystem(oldCoord);
+        WinSetDrawWindow(oldWin);
+        WinPopDrawState();
+    }
+    WinDeleteWindow(buffer,false);
+    BmpDelete(glyph);
+    if (!a->glyphs) return;
+
+    a->labelBase=BmpCreate(MAP_LABEL_BITMAP_SIDE,MAP_LABEL_BITMAP_SIDE,8,NULL,&err);
+    if (a->labelBase) {
+        a->labelPixels=BmpGetBits(a->labelBase);
+        BmpGetDimensions(a->labelBase,NULL,NULL,&stride);
+        if (a->labelPixels && stride==MAP_LABEL_BITMAP_SIDE) {
+            a->labelBitmap=(BitmapType *)BmpCreateBitmapV3(a->labelBase,
+                a->highDensity ? kDensityDouble : kDensityLow,a->labelPixels,NULL);
+        }
+    }
+    if (!a->labelBitmap) {
+        FreeLabelPainter(a);
+        return;
+    }
+    a->labelHalo=Color(255,253,241);
+    a->labelStreet=Color(35,53,51);
+    a->labelLandmark=Color(38,42,72);
+    a->labelKey=255;
+    while (a->labelKey==a->labelHalo || a->labelKey==a->labelStreet ||
+        a->labelKey==a->labelLandmark) --a->labelKey;
+    BmpSetTransparentValue(a->labelBitmap,a->labelKey);
+}
+
+static Coord LabelAdvance(const App *a, const Char *name)
+{
+    Coord advance=0;
+    while (*name) advance+=a->glyphs[GlyphIndex((UInt8)*name++)].width;
+    return advance;
+}
+
+static void PaintLabel(App *a, const Char *name, const RectangleType *box,
+    Int16 ux, Int16 uy, UInt8 ink)
+{
+    UInt32 colors=(UInt32)a->labelKey<<16 | (UInt32)a->labelHalo<<8 | ink;
+    UInt32 args[]={nativeLabelBitmap,(UInt32)a->glyphs,(UInt32)name,
+        (UInt32)a->labelPixels,box->extent.x,box->extent.y,(UInt32)(Int32)ux,(UInt32)(Int32)uy,colors};
+    PceNativeCall(a->native,args);
+    // The reusable bitmap is clipped to the portion just painted by the ARMlet.
+    WinSetClip(box);
+    WinDrawBitmap(a->labelBitmap,box->topLeft.x,box->topLeft.y);
+}
+
+static UInt16 LabelScale(const App *a) { return a->highDensity ? 2 : 1; }
+
+static void LabelDirection(Coord dx, Coord dy, Int16 *ux, Int16 *uy)
+{
+    *ux=256; *uy=0;
+    if (!dy) return;
+    if (dx<0 || (!dx && dy>0)) { dx=-dx; dy=-dy; }
+    UInt32 square=((Int32)dx*dx+(Int32)dy*dy)<<8;
+    UInt32 root=0;
+    for (UInt32 bit=1UL<<24;bit;bit>>=2) {
+        if (square>=root+bit) {
+            square-=root+bit;
+            root=(root>>1)+bit;
+        } else root>>=1;
+    }
+    *ux=(Int16)((Int32)dx*4096/(Int32)root);
+    *uy=(Int16)((Int32)dy*4096/(Int32)root);
+}
+
+typedef struct {
+    Coord x,y;
+    RectangleType caption;
+} Marker;
+
+static Boolean LocateMarker(App *a, Marker *m)
+{
+    if (!a->view.pin) return false;
     Int32 dx=(Int32)a->view.markX-(Int32)a->view.x;
     if (dx>WORLD/2) dx-=WORLD;
     if (dx<-WORLD/2) dx+=WORLD;
@@ -223,29 +453,189 @@ static void DrawMarker(App *a)
     Int32 y=a->map.topLeft.y+a->map.extent.y/2+
         ((Int32)a->view.markY-(Int32)a->view.y)/unit;
     if (x<0 || x>=a->map.extent.x || y<a->map.topLeft.y ||
-        y>=a->map.topLeft.y+a->map.extent.y) return;
-    Fill(x-5,y-11,11,9,Color(255,252,228));
-    Fill(x-4,y-10,9,7,Color(171,44,36));
-    Fill(x-1,y-3,3,4,Color(171,44,36));
-    if (a->view.name[0] && y>a->map.topLeft.y+23) {
-        Coord label=FntCharsWidth(a->view.name,StrLen(a->view.name))+8;
-        if (label>a->width-6) label=a->width-6;
+        y>=a->map.topLeft.y+a->map.extent.y) return false;
+    m->x=(Coord)x; m->y=(Coord)y;
+    Boolean small=a->view.layer==shortbread && a->labelBitmap;
+    Coord scale=LabelScale(a);
+    Coord captionHeight=small ? (MAP_GLYPH_HEIGHT+4+scale-1)/scale : 12;
+    Coord captionTop=(Coord)y-12-captionHeight;
+    if (a->view.name[0] && captionTop>=TOP) {
+        Coord label=small ? (LabelAdvance(a,a->view.name)+4+scale-1)/scale :
+            FntCharsWidth(a->view.name,StrLen(a->view.name))+8;
+        Coord max=small && MAP_LABEL_BITMAP_SIDE/scale<a->width-6 ?
+            MAP_LABEL_BITMAP_SIDE/scale : a->width-6;
+        if (small && label>max) return true;
+        if (label>max) label=max;
         Coord lx=(Coord)x-label/2;
         if (lx<3) lx=3;
         if (lx+label>a->width-3) lx=a->width-3-label;
+        RctSetRectangle(&m->caption,lx,captionTop,label,captionHeight);
+    }
+    return true;
+}
+
+static void DrawMarker(App *a, const Marker *m)
+{
+    Fill(m->x-5,m->y-11,11,9,Color(255,252,228));
+    Fill(m->x-4,m->y-10,9,7,Color(171,44,36));
+    Fill(m->x-1,m->y-3,3,4,Color(171,44,36));
+    if (!m->caption.extent.x) return;
+    Coord lx=m->caption.topLeft.x, ly=m->caption.topLeft.y;
+    if (a->view.layer==shortbread && a->labelBitmap) {
+        UInt16 scale=LabelScale(a);
+        RectangleType box;
+        RctSetRectangle(&box,lx*scale,ly*scale,m->caption.extent.x*scale,m->caption.extent.y*scale);
+        UInt16 mode=WinSetCoordinateSystem(a->highDensity ? kCoordinatesDouble : kCoordinatesStandard);
+        PaintLabel(a,a->view.name,&box,256,0,a->labelLandmark);
+        WinSetCoordinateSystem(mode);
+        WinSetClip(&a->map);
+    } else {
         IndexedColorType paper=Color(253,249,225);
-        Fill(lx,y-24,label,12,paper);
+        Fill(lx,ly,m->caption.extent.x,m->caption.extent.y,paper);
         WinSetBackColor(paper);
         WinSetTextColor(Color(46,42,34));
-        Text(a->view.name,lx+4,y-24,label-8);
+        Text(a->view.name,lx+4,ly,m->caption.extent.x-8);
     }
 }
 
 static void *Object(FormType *f, UInt16 id) { return FrmGetObjectPtr(f,FrmGetObjectIndex(f,id)); }
 
+#define DRAWN_LABELS 16
+#define DRAWN_LANDMARKS 4
+typedef struct {
+    RectangleType area;
+    const Char *name;
+} PlacedLabel;
+
+static Boolean Overlap(const RectangleType *a, const RectangleType *b)
+{
+    return a->topLeft.x < b->topLeft.x+b->extent.x &&
+           b->topLeft.x < a->topLeft.x+a->extent.x &&
+           a->topLeft.y < b->topLeft.y+b->extent.y &&
+           b->topLeft.y < a->topLeft.y+a->extent.y;
+}
+
+static Boolean LabelOccupied(const PlacedLabel *placed, UInt16 count, const RectangleType *bounds)
+{
+    for (UInt16 i=0;i<count;++i)
+        if (Overlap(bounds,&placed[i].area)) return true;
+    return false;
+}
+
+static Boolean PlaceLabel(PlacedLabel *placed, UInt16 count, const RectangleType *map,
+    const Char *name, const RectangleType *box)
+{
+    Coord x=box->topLeft.x, y=box->topLeft.y, w=box->extent.x, h=box->extent.y;
+    if (x<1 || x+w>=map->extent.x-1 || y<map->topLeft.y+1 ||
+        y+h>=map->topLeft.y+map->extent.y-1) return false;
+    RectangleType bounds;
+    RctSetRectangle(&bounds,x-2,y-1,w+4,h+2);
+    if (LabelOccupied(placed,count,&bounds)) return false;
+    placed[count]=(PlacedLabel){bounds,name};
+    return true;
+}
+
+static UInt16 DrawLabels(App *a, const Visible *v, Tile *const *tiles, UInt16 count,
+    const Marker *marker)
+{
+    PlacedLabel placed[DRAWN_LABELS+DRAWN_LANDMARKS+3];
+    UInt16 used=1, drawn=0, landmarkCount=0;
+    UInt16 scale=LabelScale(a);
+    Coord zoomHeight=2*ZOOM_HEIGHT+ZOOM_GAP;
+    RectangleType map;
+    RctSetRectangle(&map,0,TOP*scale,a->width*scale,a->map.extent.y*scale);
+    Coord bottom=map.topLeft.y+map.extent.y;
+    RctSetRectangle(&placed[0].area,(a->width-ZOOM_MARGIN-ZOOM_WIDTH)*scale,
+        (a->height-FOOT-ZOOM_MARGIN-zoomHeight)*scale,ZOOM_WIDTH*scale,zoomHeight*scale);
+    placed[0].name=NULL;
+    if (marker) {
+        RctSetRectangle(&placed[used].area,(marker->x-5)*scale,(marker->y-11)*scale,11*scale,12*scale);
+        placed[used++].name=NULL;
+        const RectangleType *r=&marker->caption;
+        if (r->extent.x) {
+            RctSetRectangle(&placed[used].area,r->topLeft.x*scale,r->topLeft.y*scale,
+                r->extent.x*scale,r->extent.y*scale);
+            placed[used++].name=NULL;
+        }
+    }
+    IndexedColorType halo=Color(255,253,241), ink=Color(38,42,72);
+    UInt16 oldCoord=WinSetCoordinateSystem(a->highDensity ? kCoordinatesDouble : kCoordinatesStandard);
+    for (UInt16 rank=5;rank>0;--rank) {
+        Boolean landmark=rank>=4;
+        for (UInt16 t=0;t<count && drawn<DRAWN_LABELS;++t) {
+            if (landmark && landmarkCount>=DRAWN_LANDMARKS) break;
+            const VectorLabels *labels=tiles[t] ? tiles[t]->labels : NULL;
+            if (!labels) continue;
+            const VectorLabel *items=landmark ? labels->landmarks : labels->streets;
+            UInt16 n=landmark ? labels->landmarkCount : labels->streetCount;
+            Coord originX=v[t].x*scale, originY=v[t].y*scale;
+            for (UInt16 i=0;i<n && drawn<DRAWN_LABELS;++i) {
+                if (landmark && landmarkCount>=DRAWN_LANDMARKS) break;
+                const VectorLabel *item=items+i;
+                if (item->priority!=rank) continue;
+                Coord ax=originX+item->x, ay=originY+item->y;
+                Coord bx=originX+item->endX, by=originY+item->endY;
+                if ((ax<0 && bx<0) || (ax>=map.extent.x && bx>=map.extent.x) ||
+                    (ay<map.topLeft.y && by<map.topLeft.y) || (ay>=bottom && by>=bottom)) continue;
+                Boolean duplicate=false;
+                for (UInt16 p=0;p<used;++p) {
+                    if (placed[p].name && !StrCompare(placed[p].name,item->name)) {
+                        duplicate=true;
+                        break;
+                    }
+                }
+                if (duplicate) continue;
+                RectangleType dot;
+                if (landmark) {
+                    RctSetRectangle(&dot,ax-2,ay-2,5,5);
+                    if (LabelOccupied(placed,used,&dot)) continue;
+                }
+                Int16 ux=256,uy=0;
+                if (!landmark) LabelDirection(bx-ax,by-ay,&ux,&uy);
+                Coord advance=LabelAdvance(a,item->name);
+                Int16 sinAbs=uy<0 ? -uy : uy;
+                Coord w=(((Int32)ux*advance+sinAbs*MAP_GLYPH_HEIGHT+255)>>8)+4;
+                Coord h=(((Int32)sinAbs*advance+ux*MAP_GLYPH_HEIGHT+255)>>8)+4;
+                if (w>MAP_LABEL_BITMAP_SIDE || h>MAP_LABEL_BITMAP_SIDE) continue;
+                RectangleType box;
+                Boolean fits=false;
+                for (UInt16 pos=0;pos<5 && !fits;++pos) {
+                    Coord x,y;
+                    if (landmark) {
+                        if (pos==4) break;
+                        x=pos==0 ? ax+4 : pos==1 ? ax-w-4 : ax-w/2;
+                        y=pos<2 ? ay-h/2 : pos==2 ? ay-h-2 : ay+2;
+                    } else {
+                        Int16 fraction=pos==0 ? 2 : pos==1 ? 1 : pos==2 ? 3 : pos==3 ? 0 : 4;
+                        x=ax+(bx-ax)*fraction/4-w/2;
+                        y=ay+(by-ay)*fraction/4-h/2;
+                    }
+                    RctSetRectangle(&box,x,y,w,h);
+                    fits=PlaceLabel(placed,used,&map,item->name,&box);
+                }
+                if (!fits) continue;
+                ++used; ++drawn;
+                if (landmark) {
+                    ++landmarkCount;
+                    placed[used++]=(PlacedLabel){dot,NULL};
+                    WinSetClip(&map);
+                    Fill(dot.topLeft.x,dot.topLeft.y,dot.extent.x,dot.extent.y,halo);
+                    Fill(ax-1,ay-1,3,3,ink);
+                }
+                PaintLabel(a,item->name,&box,ux,uy,landmark ? a->labelLandmark : a->labelStreet);
+            }
+        }
+    }
+    WinSetCoordinateSystem(oldCoord);
+    WinSetClip(&a->map);
+    return drawn;
+}
+
 static void DrawMap(App *a)
 {
     if (!a->map.extent.y) return;
+    if (a->view.layer==shortbread && (a->view.z>=VECTOR_LABEL_MIN_Z || a->view.pin))
+        PrepareLabelPainter(a);
     RectangleType clip;
     WinGetClip(&clip);
     Boolean locked=WinScreenLock(winLockCopy)!=NULL;
@@ -256,9 +646,10 @@ static void DrawMap(App *a)
     Fill(0,TOP,a->width,a->map.extent.y,blank);
     WinSetBackColor(blank);
     Visible v[SLOTS];
+    Tile *tiles[SLOTS];
     UInt16 count=VisibleTiles(a,v), drawn=0, offline=0;
     for (UInt16 i=0;i<count;++i) {
-        Tile *t=Lookup(a,v[i].key);
+        Tile *t=tiles[i]=Lookup(a,v[i].key);
         if (!t) {
             WinSetForeColor(a->view.layer==night ? Color(55,65,72) : Color(198,213,210));
             WinDrawLine(v[i].x,v[i].y,v[i].x+a->tileSide-1,v[i].y);
@@ -279,7 +670,39 @@ static void DrawMap(App *a)
         Coord x=(a->width-FntCharsWidth(status,StrLen(status)))/2;
         Text(status,x,TOP+(a->map.extent.y-FntLineHeight())/2,a->width-x-3);
     }
-    DrawMarker(a);
+    // Composite the labels after the complete terrain bitmap pass.
+    Marker marker={0};
+    Boolean hasMarker=LocateMarker(a,&marker);
+    if (a->labelBitmap && a->view.layer==shortbread && a->view.z>=VECTOR_LABEL_MIN_Z && drawn) {
+#ifdef MAP_VECTOR_BENCH
+        UInt32 started=TimGetTicks();
+        a->labelCount=DrawLabels(a,v,tiles,count,hasMarker ? &marker : NULL);
+        a->overlayTicks=TimGetTicks()-started;
+#else
+        DrawLabels(a,v,tiles,count,hasMarker ? &marker : NULL);
+#endif
+    }
+    if (hasMarker) DrawMarker(a,&marker);
+#ifdef MAP_VECTOR_BENCH
+    if (a->view.layer==shortbread && a->rendered) {
+        Char stats[80];
+        FntSetFont(stdFont);
+        StrPrintF(stats,"n=%lu draw=%lu ms max=%lu",a->rendered,
+            a->renderTicks*1000/SysTicksPerSecond()/a->rendered,
+            a->peakTicks*1000/SysTicksPerSecond());
+        Fill(2,TOP+2,FntCharsWidth(stats,StrLen(stats))+4,35,Color(255,255,255));
+        WinSetBackColor(Color(255,255,255));
+        WinSetTextColor(Color(0,0,0));
+        Text(stats,4,TOP+2,a->width-8);
+        StrPrintF(stats,"inflate %lu index %lu ms",a->unpackTicks*1000/SysTicksPerSecond(),
+            a->indexTicks*1000/SysTicksPerSecond());
+        Text(stats,4,TOP+13,a->width-8);
+        StrPrintF(stats,"labels %lu + %lu ms (%u)",
+            a->extractTicks*1000/SysTicksPerSecond()/a->rendered,
+            a->overlayTicks*1000/SysTicksPerSecond(),a->labelCount);
+        Text(stats,4,TOP+24,a->width-8);
+    }
+#endif
     WinSetClip(&clip);
     Fill(0,bottom,a->width,1,Color(96,126,121));
     IndexedColorType paper=Color(243,247,239);
@@ -313,10 +736,11 @@ static UInt32 SourceID(const App *a)
     const Pref *p=&a->view;
     // Keep tiles fetched with the compatibility engine out of the normal OSM cache.
     UInt32 compatibility=0x80000000UL;
+    if (p->layer==shortbread) return VECTOR_SOURCE;
     if (p->layer!=custom) return a->forceTls12 ? compatibility : 0;
     UInt32 hash=a->forceTls12 ? 2166136261UL^compatibility : 2166136261UL;
     for (const UInt8 *s=(const UInt8 *)p->source;*s;++s) hash=(hash^*s)*16777619UL;
-    return hash && hash!=compatibility ? hash : 1;
+    return hash && hash!=compatibility && hash!=VECTOR_SOURCE ? hash : 1;
 }
 
 static Boolean TileURL(const Char *source, TileKey k, Char *out, UInt16 cap)
@@ -370,27 +794,56 @@ static void NetworkFailure(App *a,UInt16 code)
     a->needWork=false;
 }
 
+static void CompleteTile(App *a, UInt16 step, Boolean vector)
+{
+    UInt32 now=TimGetSeconds();
+    CacheMeta meta=MapNetMetadata(&a->net,now);
+    UInt32 fresh=meta.expires>now+60 ? meta.expires : now+60;
+    TileKey key=vector ? ParentKey(a->loading) : a->loading;
+    if (step==requestNotModified) {
+        for (UInt16 i=0;i<SLOTS;++i) {
+            Tile *t=a->tiles+i;
+            if (t->base[0] && SameTile(vector ? ParentKey(t->key) : t->key,key))
+                t->meta.expires=fresh;
+        }
+        if (vector && a->vectorSize && SameTile(a->vectorKey,key))
+            a->vectorMeta.expires=fresh;
+        CacheTouch(&a->cache,key,meta.expires);
+        return;
+    }
+    const UInt8 *data=a->net.body;
+    UInt32 bytes=a->net.length;
+    CacheMeta renderMeta=meta;
+    renderMeta.expires=fresh;
+    if (vector) {
+        if (!UnpackVector(a,key,data,bytes,&renderMeta) ||
+            !Decode(a,a->loading,a->vectorData,a->vectorSize,false,&renderMeta)) {
+            a->vectorSize=0;
+            NetworkFailure(a,0);
+            return;
+        }
+        for (UInt16 i=0;i<SLOTS;++i) {
+            Tile *t=a->tiles+i;
+            if (t->base[0] && !SameTile(t->key,a->loading) && SameTile(ParentKey(t->key),key))
+                Destroy(t);
+        }
+    } else if (!Decode(a,a->loading,data,bytes,false,&renderMeta)) {
+        NetworkFailure(a,0);
+        return;
+    }
+    if (meta.expires) CacheWrite(&a->cache,key,data,bytes,&meta);
+    else CacheTouch(&a->cache,key,0);
+}
+
 static void Work(App *a)
 {
     if (a->drag || !a->needWork || (Int32)(TimGetTicks()-a->settleAt)<0) return;
+    Boolean vector=a->view.layer==shortbread;
     if (a->net.phase!=netIdle) {
         UInt16 step=MapNetStep(&a->net);
         if (step==requestBusy) return;
         if (step==requestError) NetworkFailure(a,a->net.code);
-        else {
-            UInt32 now=TimGetSeconds();
-            CacheMeta meta=MapNetMetadata(&a->net,now);
-            if (step==requestNotModified) {
-                Tile *t=Lookup(a,a->loading);
-                if (t) t->meta.expires=meta.expires>now+60 ? meta.expires : now+60;
-                CacheTouch(&a->cache,a->loading,meta.expires);
-            } else if (Decode(a,a->loading,a->net.body,a->net.length,false,&meta)) {
-                Tile *t=Lookup(a,a->loading);
-                if (t->meta.expires<now+60) t->meta.expires=now+60;
-                if (meta.expires) CacheWrite(&a->cache,a->loading,a->net.body,a->net.length,&meta);
-                else CacheTouch(&a->cache,a->loading,0);
-            } else NetworkFailure(a,0);
-        }
+        else CompleteTile(a,step,vector);
         DrawMap(a);
         return;
     }
@@ -399,10 +852,24 @@ static void Work(App *a)
     UInt16 count=VisibleTiles(a,v), best=count;
     Int32 distance=0x7fffffffL;
     UInt32 now=TimGetSeconds();
+    if (vector && a->vectorSize) {
+        // Finish all visible children before loading a different parent.
+        for (UInt16 i=0;i<count;++i) {
+            if (!SameTile(ParentKey(v[i].key),a->vectorKey) || Lookup(a,v[i].key)) continue;
+            if (Decode(a,v[i].key,a->vectorData,a->vectorSize,false,&a->vectorMeta)) {
+                DrawMap(a);
+                return;
+            }
+            a->vectorSize=0;
+            NetworkFailure(a,0);
+            DrawMap(a);
+            return;
+        }
+    }
     for (UInt16 i=0;i<count;++i) {
         Tile *t=Lookup(a,v[i].key);
         if (!t && (a->view.layer==overview ? LoadOverview(a,v[i].key) :
-              LoadCached(a,v[i].key) || LoadOverview(a,v[i].key))) {
+              LoadCached(a,v[i].key) || (!vector && LoadOverview(a,v[i].key)))) {
             DrawMap(a);
             return;
         }
@@ -418,13 +885,14 @@ static void Work(App *a)
         NetworkFailure(a,0);
     } else {
         a->loading=v[best].key;
+        TileKey key=vector ? ParentKey(a->loading) : a->loading;
+        const Char *source=vector ? SHORTBREAD : a->view.layer==custom ? a->view.source : OSM;
         Char url[224];
-        if (!TileURL(a->view.layer==custom ? a->view.source : OSM,a->loading,url,sizeof(url)))
-            NetworkFailure(a,0);
+        if (!TileURL(source,key,url,sizeof(url))) NetworkFailure(a,0);
         else {
             Tile *cached=Lookup(a,a->loading);
             if (!MapNetStart(&a->net,url,cached && !cached->fallback ? &cached->meta : NULL,
-                             a->forceTls12))
+                             a->forceTls12,vector))
                 NetworkFailure(a,a->net.code);
             else a->blocked=false;
         }
@@ -439,6 +907,9 @@ static void Zoom(App *a, Int16 amount)
     Int16 z=(Int16)a->view.z+amount;
     if (z<0 || z>MaxZoom(a)) return;
     a->view.z=(UInt8)z;
+#ifdef MAP_VECTOR_BENCH
+    a->unpackTicks=a->renderTicks=a->peakTicks=a->rendered=a->extractTicks=a->indexTicks=0;
+#endif
     Wake(a);
     DrawMap(a);
 }
@@ -454,6 +925,21 @@ static void Pan(App *a, Int16 dx, Int16 dy)
 static void Layer(App *a, UInt8 layer)
 {
     if (a->view.layer==layer) return;
+    FreeLabelPainter(a);
+    a->labelPainterTried=false;
+    if (a->labelIndex) {
+        MemPtrFree(a->labelIndex);
+        a->labelIndex=NULL;
+    }
+    a->indexReady=a->indexTried=false;
+    if (a->vectorData) {
+        MemPtrFree(a->vectorData);
+        a->vectorData=NULL;
+        a->vectorSize=0;
+    }
+#ifdef MAP_VECTOR_BENCH
+    a->unpackTicks=a->renderTicks=a->peakTicks=a->rendered=a->extractTicks=a->indexTicks=0;
+#endif
     a->view.layer=layer;
     if (a->view.z>MaxZoom(a)) a->view.z=MaxZoom(a);
     a->sourceId=SourceID(a);
@@ -678,7 +1164,7 @@ static Boolean MainEvent(App *a,FormType *f,EventType *e)
             FrmGotoForm(SearchForm);
             return true;
         }
-        if (e->data.menu.itemID>=MenuLayerStreets && e->data.menu.itemID<=MenuLayerCustom) {
+        if (e->data.menu.itemID>=MenuLayerStreets && e->data.menu.itemID<=MenuLayerShortbread) {
             Layer(a,(UInt8)(e->data.menu.itemID-MenuLayerStreets));
             DrawMap(a);
             return true;
@@ -886,6 +1372,9 @@ done:
     if (a->native) MemHandleUnlock(a->arm);
     if (a->arm) DmReleaseResource(a->arm);
     if (a->scratch) MemPtrFree(a->scratch);
+    if (a->vectorData) MemPtrFree(a->vectorData);
+    if (a->labelIndex) MemPtrFree(a->labelIndex);
+    FreeLabelPainter(a);
     MemPtrFree(a);
     return result;
 }

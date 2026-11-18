@@ -26,3 +26,4 @@
 #define MenuLayerNight 1111
 #define MenuLayerOverview 1112
 #define MenuLayerCustom 1113
+#define MenuLayerShortbread 1114
