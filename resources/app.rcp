@@ -1,0 +1,103 @@
+#include "resource.h"
+#include "generated.rcp"
+
+DATA "code" ID 1 "code0001.bin"
+DATA "armc" ID 1000 "maparm.bin"
+DATA "cert" ID 1000 "roots.pem"
+HEX "pref" ID 0 0x00 0x1e 0x00 0x00 0x80 0x00 0x00 0x00 0x30 0x00
+
+FORM ID MainForm AT (0 0 160 160) MENUID MainMenu
+BEGIN
+    TITLE "Map"
+    BUTTON "+" ID PlusButton AT (130 96 24 20) FONT 1
+    BUTTON "-" ID MinusButton AT (130 120 24 20) FONT 1
+END
+
+FORM ID SearchForm AT (0 0 160 160)
+BEGIN
+    TITLE "Find a place"
+    FIELD ID SearchField AT (5 18 104 14) EDITABLE UNDERLINED SINGLELINE MAXCHARS 60
+    GRAFFITISTATEINDICATOR AT (146 44)
+    BUTTON "Find" ID FindButton AT (115 17 40 14) FONT 1
+    LIST " " ID ResultsList AT (5 57 150 77) VISIBLEITEMS 7
+    BUTTON "Show on map" ID UseButton AT (5 140 73 14)
+    BUTTON "Back" ID BackButton AT (111 140 44 14)
+END
+
+FORM ID SourceForm AT (0 0 160 160)
+BEGIN
+    TITLE "Custom tile layer"
+    LABEL "HTTPS PNG tile template" ID 1024 AT (6 21) FONT 1
+    LABEL "Include {z}, {x} and {y}." ID 1025 AT (6 36)
+    GRAFFITISTATEINDICATOR AT (146 36)
+    FIELD ID SourceField AT (6 54 148 51) EDITABLE UNDERLINED MULTIPLELINES MAXCHARS 150
+    LABEL "Leave blank to disable." ID 1026 AT (6 115)
+    BUTTON "Save" ID SaveButton AT (6 139 50 15) FONT 1
+    BUTTON "Cancel" ID CancelButton AT (104 139 50 15)
+END
+
+MENU ID MainMenu
+BEGIN
+    PULLDOWN "Map"
+    BEGIN
+        MENUITEM "Find..." ID MenuFind "F"
+        MENUITEM "Retry tiles" ID MenuRetry "R"
+        MENUITEM "Custom tile layer..." ID MenuSource
+        MENUITEM "HTTPS mode..." ID MenuHttps
+        MENUITEM "About Map" ID MenuAbout
+    END
+    PULLDOWN "Layers"
+    BEGIN
+        MENUITEM "Streets" ID MenuLayerStreets
+        MENUITEM "Night" ID MenuLayerNight
+        MENUITEM "Overview" ID MenuLayerOverview
+        MENUITEM "Custom" ID MenuLayerCustom
+    END
+END
+
+ALERT ID HelpAlert INFORMATION
+BEGIN
+    TITLE "About Map 0.1.5"
+    MESSAGE "Drag the map or use the direction buttons. Use Find in the Map menu to search for places. Use the Layers menu to switch maps.\n\nMap data: OpenStreetMap contributors. Report issues: openstreetmap.org/fixthemap. Offline overview: Natural Earth. Place index: GeoNames (CC BY 4.0)."
+    BUTTONS "OK"
+END
+ALERT ID RomAlert ERROR
+BEGIN
+    TITLE "Palm OS 5 required"
+    MESSAGE "Map requires an ARM Palm OS 5 handheld."
+    BUTTONS "OK"
+END
+ALERT ID SourceAlert ERROR
+BEGIN
+    TITLE "Invalid tile template"
+    MESSAGE "Enter an HTTPS URL with {z}, {x} and {y}, or clear the field. Tiles must be 256 x 256 PNGs."
+    BUTTONS "OK"
+END
+
+ICON ID 1000
+BEGIN
+    BITMAP "icon.bmp" BPP 8 DENSITY 72 TRANSPARENCY 255 0 255
+    BITMAP "icon2x.bmp" BPP 8 DENSITY 144 TRANSPARENCY 255 0 255
+END
+SMALLICON ID 1001
+BEGIN
+    BITMAP "small.bmp" BPP 8 DENSITY 72 TRANSPARENCY 255 0 255
+    BITMAP "small2x.bmp" BPP 8 DENSITY 144 TRANSPARENCY 255 0 255
+END
+APPLICATIONICONNAME ID 1000 "Map"
+VERSION ID 1000 "0.1.5"
+STRING ID 1000 "0.1.5"
+ALERT ID MemoryAlert ERROR
+BEGIN
+    TITLE "Map could not start"
+    MESSAGE "Map needs more free memory or a fresh copy of Map.prc."
+    BUTTONS "OK"
+END
+
+
+ALERT ID HttpsAlert WARNING
+BEGIN
+    TITLE "HTTPS mode"
+    MESSAGE "Current mode: ^1.\n\nModern uses separately provisioned entropy. TLS 1.2 uses PalmTLS's older, weaker random source and needs the TLS 1.2 compatibility library."
+    BUTTONS "Modern" "TLS 1.2" "Cancel"
+END
