@@ -27,3 +27,17 @@
 #define MenuLayerOverview 1112
 #define MenuLayerCustom 1113
 #define MenuLayerShortbread 1114
+#define ShortbreadForm 1030
+#define ShowRoads 1031
+#define ShowBuildings 1032
+#define ShowWater 1033
+#define ShowLand 1034
+#define ShowStreetNames 1035
+#define ShowLandmarkNames 1036
+#define AngleStreetNames 1037
+#define HighContrast 1038
+#define ApplyShortbread 1039
+#define ResetShortbread 1040
+#define CancelShortbread 1041
+#define MenuLayerCycle 1115
+#define MenuShortbreadSettings 1116

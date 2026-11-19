@@ -6,11 +6,24 @@
 #define VECTOR_CAPACITY (768UL * 1024)
 
 enum { nativePng, nativeProject, nativeVectorUnpack, nativeVectorDraw, nativeVectorLabels,
-    nativeIndexLabels, nativeLabelBitmap };
+    nativeIndexLabels, nativeLabelBitmap, nativeIndexScene };
+
+enum {
+    vectorRoads = 1u << 0, vectorBuildings = 1u << 1,
+    vectorWater = 1u << 2, vectorLand = 1u << 3,
+    vectorStreetNames = 1u << 4, vectorLandmarks = 1u << 5,
+    vectorAngledNames = 1u << 6, vectorHighContrast = 1u << 7
+};
+
+#define VECTOR_DEFAULT (vectorRoads | vectorBuildings | vectorWater | vectorLand | \
+    vectorStreetNames | vectorLandmarks | vectorAngledNames)
+#define VECTOR_OPTION_MASK (VECTOR_DEFAULT | vectorHighContrast)
+#define VECTOR_TILE_OPTIONS (vectorRoads | vectorBuildings | vectorWater | vectorLand | vectorHighContrast)
 
 #define VECTOR_LABEL_LIMIT 32
 #define VECTOR_LABEL_MIN_Z 10
 #define VECTOR_INDEX_CAPACITY (128UL * 1024)
+#define VECTOR_SCENE_CAPACITY (192UL * 1024)
 #define MAP_GLYPH_HEIGHT 12
 #define MAP_GLYPH_COUNT 224
 #define MAP_LABEL_BITMAP_SIDE 224
@@ -37,9 +50,10 @@ void MapLabelBitmap(const MapGlyph *font, const char *text, unsigned char *pixel
     unsigned width, unsigned height, int ux, int uy, unsigned colors);
 void VectorReadLabels(const unsigned char *data, unsigned size, unsigned char *scratch,
     unsigned shift, unsigned childX, unsigned childY, VectorLabels *labels, const void *index);
+int VectorIndexScene(const unsigned char *data, unsigned size, void *index);
 int VectorDraw(const unsigned char *data, unsigned size,
     unsigned char *const *bands, unsigned char *scratch, unsigned shift,
-    unsigned childX, unsigned childY);
+    unsigned childX, unsigned childY, unsigned options, const void *index);
 unsigned VectorUnpack(const unsigned char *data, unsigned size,
     unsigned char *out, unsigned capacity, unsigned char *scratch);
 #endif

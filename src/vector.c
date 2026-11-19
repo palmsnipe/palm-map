@@ -19,18 +19,18 @@ typedef struct { const Byte *at, *end; } Span;
 
 static const struct {
     char name[16];
-    unsigned short color;
-    Byte type, width;
+    unsigned short color, contrast;
+    Byte type, width, option;
 } styles[] = {
-    {"ocean",           RGB565(166,204,223), polygon, 0},
-    {"land",            RGB565(216,232,199), polygon, 0},
-    {"sites",           RGB565(226,223,212), polygon, 0},
-    {"water_polygons",  RGB565(166,204,223), polygon, 0},
-    {"water_lines",     RGB565(148,193,217), line, 1},
-    {"street_polygons", RGB565(255,252,237), polygon, 0},
-    {"streets",         RGB565(255,253,247), line, 2},
-    {"bridges",         RGB565(255,253,247), polygon, 0},
-    {"buildings",       RGB565(181,143,130), polygon, 0},
+    {"ocean",           RGB565(166,204,223), RGB565(95,159,193),  polygon, 0, vectorWater},
+    {"land",            RGB565(216,232,199), RGB565(174,207,145), polygon, 0, vectorLand},
+    {"sites",           RGB565(226,223,212), RGB565(219,209,186), polygon, 0, vectorLand},
+    {"water_polygons",  RGB565(166,204,223), RGB565(95,159,193),  polygon, 0, vectorWater},
+    {"water_lines",     RGB565(148,193,217), RGB565(44,112,158),  line,    1, vectorWater},
+    {"street_polygons", RGB565(255,252,237), RGB565(255,255,255), polygon, 0, vectorRoads},
+    {"streets",         RGB565(255,253,247), RGB565(86,72,61),    line,    2, vectorRoads},
+    {"bridges",         RGB565(255,253,247), RGB565(255,255,255), polygon, 0, vectorRoads},
+    {"buildings",       RGB565(181,143,130), RGB565(135,87,68),   polygon, 0, vectorBuildings},
 };
 enum { styleCount = sizeof(styles) / sizeof(*styles) };
 
@@ -238,15 +238,13 @@ static int readDelta(Span *s, int *x, int *y, int extent)
     return 1;
 }
 
-static int geometry(Canvas *c, Span s, unsigned type, int extent,
-    unsigned shift, unsigned childX, unsigned childY)
+static int drawPath(Canvas *c, Span s, unsigned type, int extent,
+    unsigned shift, unsigned childX, unsigned childY, int x, int y)
 {
-    int x = 0, y = 0, px = 0, py = 0, startX = 0, startY = 0;
+    int px = 0, py = 0, startX = 0, startY = 0;
     int offsetX = (int)childX * side * subpixel, offsetY = (int)childY * side * subpixel;
     int scale = (side * subpixel) << shift;
     int points = 0;
-    c->firstRow = side;
-    c->lastRow = 0;
     while (s.at < s.end) {
         unsigned cmd;
         if (!varint(&s, &cmd)) return 0;
@@ -279,52 +277,73 @@ static int geometry(Canvas *c, Span s, unsigned type, int extent,
             px = nx; py = ny;
         }
     }
-    if (type == polygon) {
-        if (points) return 0;
-        fillPolygon(c);
-    }
-    return 1;
+    return type != polygon || !points;
 }
 
-static int renderLayer(Canvas *c, Span layer, unsigned style,
-    unsigned shift, unsigned childX, unsigned childY)
+static int layerExtent(Span fields, unsigned *extent)
 {
-    unsigned extent = 4096;
-    for (Span fields = layer; fields.at < fields.end;) {
+    *extent = 4096;
+    while (fields.at < fields.end) {
         Field f;
         if (!field(&fields, &f)) return 0;
         if (f.number == 5 && f.wire == 0) {
             Span value = payload(f);
-            if (!varint(&value, &extent) || !extent || extent > 65536) return 0;
+            if (!varint(&value, extent) || !*extent || *extent > 65536) return 0;
         }
-    }
-    c->color = styles[style].color;
-    c->width = styles[style].width + (styles[style].width && shift >= 3 ? 1 : 0);
-    while (layer.at < layer.end) {
-        Field f;
-        if (!field(&layer, &f)) return 0;
-        if (f.number != 2 || f.wire != 2) continue;
-        Span feature = payload(f), commands = {0};
-        unsigned type = 0;
-        while (feature.at < feature.end) {
-            if (!field(&feature, &f)) return 0;
-            if (f.number == 4 && f.wire == 2) commands = payload(f);
-            if (f.number == 3 && f.wire == 0) {
-                Span value = payload(f);
-                if (!varint(&value, &type)) return 0;
-            }
-        }
-        if (type == styles[style].type && commands.at &&
-            !geometry(c, commands, type, (int)extent, shift, childX, childY)) return 0;
     }
     return 1;
 }
 
-int VectorDraw(const Byte *data, unsigned size, Byte *const *bands, Byte *scratch,
-    unsigned shift, unsigned childX, unsigned childY)
+static int featureGeometry(Span feature, Span *commands, unsigned *type)
 {
-    if (shift > 5 || childX >= (1u << shift) || childY >= (1u << shift)) return 0;
-    Span tile = {data, data + size}, layers[styleCount] = {{0}};
+    while (feature.at < feature.end) {
+        Field f;
+        if (!field(&feature, &f)) return 0;
+        if (f.number == 4 && f.wire == 2) *commands = payload(f);
+        if (f.number == 3 && f.wire == 0) {
+            Span value = payload(f);
+            if (!varint(&value, type)) return 0;
+        }
+    }
+    return 1;
+}
+
+static void layerStyle(Canvas *c, unsigned style, unsigned shift, unsigned options)
+{
+    c->color = options & vectorHighContrast ? styles[style].contrast : styles[style].color;
+    c->width = styles[style].width + (styles[style].width && shift >= 3 ? 1 : 0);
+}
+
+static void finishPolygon(Canvas *c)
+{
+    fillPolygon(c);
+    c->firstRow = side;
+    c->lastRow = 0;
+}
+
+static int renderLayer(Canvas *c, Span layer, unsigned style,
+    unsigned shift, unsigned childX, unsigned childY, unsigned options)
+{
+    unsigned extent;
+    if (!layerExtent(layer,&extent)) return 0;
+    layerStyle(c,style,shift,options);
+    while (layer.at < layer.end) {
+        Field f;
+        if (!field(&layer,&f)) return 0;
+        if (f.number != 2 || f.wire != 2) continue;
+        Span commands = {0};
+        unsigned type = 0;
+        if (!featureGeometry(payload(f),&commands,&type)) return 0;
+        if (type != styles[style].type || !commands.at) continue;
+        if (!drawPath(c,commands,type,(int)extent,shift,childX,childY,0,0)) return 0;
+        if (type == polygon) finishPolygon(c);
+    }
+    return 1;
+}
+
+static int selectLayers(const Byte *data, unsigned size, Span *layers, unsigned options)
+{
+    Span tile = {data, data + size};
     while (tile.at < tile.end) {
         Field f;
         if (!field(&tile, &f)) return 0;
@@ -334,17 +353,147 @@ int VectorDraw(const Byte *data, unsigned size, Byte *const *bands, Byte *scratc
             if (!field(&header, &f)) return 0;
             if (f.number != 1 || f.wire != 2) continue;
             for (unsigned i = 0; i < styleCount; ++i) {
-                if (f.size < sizeof(styles[i].name) && !styles[i].name[f.size] &&
-                    !memcmp(styles[i].name, f.data, f.size)) layers[i] = layer;
+                if ((options & styles[i].option) && f.size < sizeof(styles[i].name) &&
+                    !styles[i].name[f.size] && !memcmp(styles[i].name, f.data, f.size))
+                    layers[i] = layer;
             }
             break;
         }
     }
-    Canvas canvas = {bands, scratch, RGB565(239,235,219), side, 0, 0};
+    return 1;
+}
+
+enum { pathLimit = 8160, sceneExtent = 4096 };
+#define FEATURE_END (1u << 31)
+typedef struct {
+    unsigned offset, length;
+    int x, y;
+    int16_t left, top, right, bottom;
+} PathRef;
+
+typedef struct {
+    unsigned first[styleCount+1], count;
+    PathRef paths[pathLimit];
+} SceneIndex;
+
+_Static_assert(sizeof(SceneIndex) <= VECTOR_SCENE_CAPACITY, "scene index must fit");
+
+static int appendPath(SceneIndex *index, PathRef path, const Byte *base,
+    const Byte *start, const Byte *end)
+{
+    if (index->count == pathLimit) return 0;
+    path.offset = (unsigned)(start-base);
+    path.length = (unsigned)(end-start);
+    index->paths[index->count++] = path;
+    return 1;
+}
+
+static int indexPaths(SceneIndex *index, const Byte *base, Span commands, unsigned type)
+{
+    unsigned first = index->count, points = 0;
+    int x=0, y=0;
+    PathRef path = {0};
+    const Byte *start = NULL;
+    while (commands.at < commands.end) {
+        const Byte *at = commands.at;
+        unsigned cmd;
+        if (!varint(&commands,&cmd)) return 0;
+        unsigned op = cmd & 7, count = cmd >> 3;
+        if (op == 7 && type == polygon && count == 1 && points >= 3) {
+            if (!appendPath(index,path,base,start,commands.at)) return 0;
+            start = NULL;
+            points = 0;
+            continue;
+        }
+        if (op == 1) {
+            if (count != 1 || (type == polygon && points)) return 0;
+            if (start && !appendPath(index,path,base,start,at)) return 0;
+            start = at;
+            path = (PathRef){.x=x,.y=y,.left=32767,.top=32767,.right=-32768,.bottom=-32768};
+            points = 0;
+        } else if (op != 2 || !count || !points) return 0;
+        for (unsigned i=0; i<count; ++i) {
+            if (!readDelta(&commands,&x,&y,sceneExtent)) return 0;
+            int bx = x <= 32767 ? x : 32767, by = y <= 32767 ? y : 32767;
+            if (bx < path.left) path.left = bx;
+            if (bx > path.right) path.right = bx;
+            if (by < path.top) path.top = by;
+            if (by > path.bottom) path.bottom = by;
+            ++points;
+        }
+    }
+    if (start && (type == polygon || !appendPath(index,path,base,start,commands.at))) return 0;
+    if (index->count > first) index->paths[index->count-1].length |= FEATURE_END;
+    return 1;
+}
+
+int VectorIndexScene(const Byte *data, unsigned size, void *storage)
+{
+    SceneIndex *index = storage;
+    Span layers[styleCount] = {{0}};
+    if (!selectLayers(data,size,layers,VECTOR_TILE_OPTIONS)) return 0;
+    index->count = 0;
+    for (unsigned i=0; i<styleCount; ++i) {
+        index->first[i] = index->count;
+        Span layer = layers[i];
+        if (!layer.at) continue;
+        unsigned extent;
+        if (!layerExtent(layer,&extent) || extent != sceneExtent) return 0;
+        while (layer.at < layer.end) {
+            Field f;
+            if (!field(&layer,&f)) return 0;
+            if (f.number != 2 || f.wire != 2) continue;
+            Span commands = {0};
+            unsigned type = 0;
+            if (!featureGeometry(payload(f),&commands,&type)) return 0;
+            if (type == styles[i].type && commands.at && !indexPaths(index,data,commands,type))
+                return 0;
+        }
+    }
+    index->first[styleCount] = index->count;
+    return 1;
+}
+
+static int renderScene(Canvas *c, const Byte *data, const SceneIndex *index,
+    unsigned shift, unsigned childX, unsigned childY, unsigned options)
+{
+    int tile = sceneExtent >> shift;
+    // Include the maximum stroke width along tile edges.
+    int margin = (3 * subpixel + (1 << shift) - 1) >> shift;
+    int left = (int)childX*tile-margin, right = left+tile+2*margin;
+    int top = (int)childY*tile-margin, bottom = top+tile+2*margin;
+    for (unsigned i=0; i<styleCount; ++i) {
+        if (!(styles[i].option & options)) continue;
+        layerStyle(c,i,shift,options);
+        unsigned type = styles[i].type;
+        for (unsigned p=index->first[i]; p<index->first[i+1]; ++p) {
+            const PathRef *path = index->paths+p;
+            if (path->right >= left && path->left <= right &&
+                path->bottom >= top && path->top <= bottom) {
+                Span commands={data+path->offset,data+path->offset+(path->length & ~FEATURE_END)};
+                if (!drawPath(c,commands,type,sceneExtent,shift,childX,childY,path->x,path->y))
+                    return 0;
+            }
+            // All rings of a feature share the same fill mask, including holes.
+            if (type == polygon && (path->length & FEATURE_END)) finishPolygon(c);
+        }
+    }
+    return 1;
+}
+
+int VectorDraw(const Byte *data, unsigned size, Byte *const *bands, Byte *scratch,
+    unsigned shift, unsigned childX, unsigned childY, unsigned options, const void *scene)
+{
+    if (shift > 5 || childX >= (1u << shift) || childY >= (1u << shift)) return 0;
+    unsigned short paper = options & vectorHighContrast ? RGB565(247,245,232) : RGB565(239,235,219);
+    Canvas canvas = {bands, scratch, paper, side, 0, 0};
     memset(scratch, 0, side * maskStride);
     for (int y = 0; y < side; ++y) paint(&canvas, y, 0, side);
-    for (unsigned i = 0; i < styleCount; ++i)
-        if (layers[i].at && !renderLayer(&canvas, layers[i], i, shift, childX, childY))
+    if (scene) return renderScene(&canvas,data,scene,shift,childX,childY,options);
+    Span layers[styleCount] = {{0}};
+    if (!selectLayers(data,size,layers,options)) return 0;
+    for (unsigned i=0; i<styleCount; ++i)
+        if (layers[i].at && !renderLayer(&canvas,layers[i],i,shift,childX,childY,options))
             return 0;
     return 1;
 }
@@ -386,13 +535,22 @@ static int indexLabels(LabelIndex *idx, Span layer, unsigned *values, int landma
     *idx = (LabelIndex){.bytes = layer, .values = values, .extent = 4096};
     unsigned keys = 0;
     while (layer.at < layer.end) {
-        const Byte *fieldStart = layer.at;
         Field f;
         if (!field(&layer, &f)) return 0;
         if (f.number == 3 && f.wire == 2 && keys < keyLimit)
             idx->keys[keys++] = labelKey(payload(f), landmarks);
-        if (f.number == 4 && f.wire == 2 && idx->count < valueLimit)
-            values[idx->count++] = (unsigned)(fieldStart - idx->bytes.at);
+        if (f.number == 4 && f.wire == 2 && idx->count < valueLimit) {
+            // Cache the checked string span, rather than re-reading the
+            // protobuf value every time another feature reuses this tag.
+            Span bytes = payload(f);
+            Field value;
+            unsigned packed = 0;
+            if (field(&bytes,&value) && value.number == 1 && value.wire == 2 && value.size <= 255) {
+                unsigned offset = (unsigned)(value.data - idx->bytes.at);
+                if (offset <= 0xffffffu) packed = (offset << 8) | value.size;
+            }
+            values[idx->count++] = packed;
+        }
         if (f.number == 5 && f.wire == 0) {
             Span extent = payload(f);
             if (!varint(&extent, &idx->extent) || !idx->extent || idx->extent > 65536)
@@ -404,17 +562,11 @@ static int indexLabels(LabelIndex *idx, Span layer, unsigned *values, int landma
 
 static Span labelValue(const LabelIndex *idx, unsigned value)
 {
-    if (value < idx->count) {
-        // A string Value starts with field 1. Read its length within the
-        // enclosing Value message, even when adjacent messages are valid.
-        Span s = {idx->bytes.at + idx->values[value], idx->bytes.end};
-        Field f;
-        if (field(&s, &f) && f.number == 4 && f.wire == 2) {
-            s = payload(f);
-            if (field(&s, &f) && f.number == 1 && f.wire == 2) return payload(f);
-        }
-    }
-    return (Span){0};
+    if (value >= idx->count) return (Span){0};
+    unsigned packed = idx->values[value], length = packed & 255;
+    if (!length) return (Span){0};
+    const Byte *start = idx->bytes.at + (packed >> 8);
+    return (Span){start, start + length};
 }
 
 static unsigned priority(Byte key, Span value)

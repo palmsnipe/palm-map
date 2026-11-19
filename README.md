@@ -14,6 +14,9 @@ select a result, and tap **Show on map**. Open the **Layers** menu and tap a lay
 - **Streets**: the standard OpenStreetMap raster style, zoom 0–19.
 - **Night**: a darker rendering of the same OpenStreetMap tiles. Shares the
   tile cache with Streets.
+- **Cycle Map**: CyclOSM raster tiles with cycling routes and infrastructure,
+  served over HTTPS by OpenStreetMap France. See the [CyclOSM map](https://www.cyclosm.org/)
+  and the [OpenStreetMap France usage policy](https://www.openstreetmap.fr/usage/).
 - **Overview**: a built-in Natural Earth map, zoom 0–3, usable without a connection.
 - **Custom**: set a tile template under **Map → Custom tile layer**. Use an
   authorized provider or your own server, with an HTTPS URL such as
@@ -30,11 +33,21 @@ select a result, and tap **Show on map**. Open the **Layers** menu and tap a lay
   See the [Shortbread schema](https://shortbread-tiles.org/schema/1.0/)
   and the [OSM vector tile policy](https://operations.osmfoundation.org/policies/vector/).
 
+Open **Layers → Shortbread settings** to show or hide roads, buildings,
+water, land cover, street names, and landmark names. Turn off angled
+street names to draw road labels horizontally, or enable high contrast
+for more distinct roads and features. **Apply** saves your choices.
+**Defaults** restores the original selections in the form.
+
 Map opens on Streets and restores the saved viewport and marker. The tile cache is bounded
 to about 3 MiB and uses server expiry and validators. Map only requests tiles
 visible after a pan or zoom; it does not bulk download tiles for offline use.
 See the [standard tile policy](https://operations.osmfoundation.org/policies/tiles/).
 To retry after connecting, tap the footer or use **Map → Retry tiles**.
+
+The top-right counter shows tile data downloaded in the current launch in
+decimal kilobytes. It counts compressed tiles as received and stays unchanged
+when you use cached tiles.
 
 ## Enable HTTPS
 
@@ -162,3 +175,10 @@ The first overzoom built the label index for the Parliament Hill source tile
 in 80 ms. The zoom 19 tile measurement reused that index. Tile download,
 inflation, and screen bitmap blitting were measured separately or outside
 these figures.
+
+Map 0.2.1 was checked on the emulated Tungsten E2 at 100 MIPS. Four
+CyclOSM tiles at zoom 14 averaged 52 ms each to decode. The Shortbread
+geometry pass at Parliament Hill averaged 10 ms per tile at zoom 19
+with the source tile and its path index already in memory. The download
+counter increased on live requests and held steady when revisiting cached
+tiles and overzooming the same vector source.

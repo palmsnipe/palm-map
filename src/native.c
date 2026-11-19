@@ -137,7 +137,8 @@ Word VectorUnpack(const Byte *data, Word size, Byte *out, Word capacity, Byte *s
 
 typedef struct {
     z_stream z;
-    Byte row[1025], previous[1024], palette[256][4];
+    Byte rows[2][1025], palette[256][4];
+    unsigned short colors[256];
     Word rowLen, y, stride, kind, depth, channels, ncolors, dark;
     Byte *bands[4];
     int done;
@@ -150,53 +151,103 @@ static int paeth(int a, int b, int c)
     return da <= db && da <= dc ? a : db <= dc ? b : c;
 }
 
+static Word rgb565(Word r, Word g, Word b)
+{
+    return ((r & 248) << 8) | ((g & 252) << 3) | (b >> 3);
+}
+
+static Word renderColor(Word r, Word g, Word b, Word alpha, Word dark)
+{
+    if (alpha != 255) {
+        r = 255 - (255-r)*alpha/255;
+        g = 255 - (255-g)*alpha/255;
+        b = 255 - (255-b)*alpha/255;
+    }
+    if (dark) {
+        r = 26 + (255-r)*5/8;
+        g = 30 + (255-g)*5/8;
+        b = 39 + (255-b)*5/8;
+    }
+    return rgb565(r,g,b);
+}
+
+static void prepareColors(Png *p)
+{
+    if (p->kind == 3) {
+        for (Word i = 0; i < p->ncolors; ++i) {
+            const Byte *color = p->palette[i];
+            p->colors[i] = renderColor(color[0],color[1],color[2],color[3],p->dark);
+        }
+    } else if (!p->kind) {
+        p->ncolors = 1u << p->depth;
+        for (Word i = 0; i < p->ncolors; ++i) {
+            Word gray = i*255/(p->ncolors-1);
+            p->colors[i] = renderColor(gray,gray,gray,255,p->dark);
+        }
+    }
+}
+
+static int unfilter(Byte *row, const Byte *up, Word length, Word bpp, Word filter)
+{
+    switch (filter) {
+    case 0: break;
+    case 1:
+        for (Word i = bpp; i < length; ++i) row[i] += row[i-bpp];
+        break;
+    case 2:
+        for (Word i = 0; i < length; ++i) row[i] += up[i];
+        break;
+    case 3:
+        for (Word i = 0; i < bpp; ++i) row[i] += up[i] >> 1;
+        for (Word i = bpp; i < length; ++i) row[i] += (row[i-bpp] + up[i]) >> 1;
+        break;
+    case 4:
+        for (Word i = 0; i < bpp; ++i) row[i] += up[i];
+        for (Word i = bpp; i < length; ++i) row[i] += paeth(row[i-bpp],up[i],up[i-bpp]);
+        break;
+    default: return 0;
+    }
+    return 1;
+}
+
+static void pixel565(Byte *out, Word color)
+{
+    out[0] = color >> 8;
+    out[1] = color;
+}
+
 static int drawRow(Png *p)
 {
-    Byte *row = p->row + 1, *up = p->previous;
-    Word bpp = p->depth < 8 ? 1 : p->channels;
-    Word filter = p->row[0];
-    if (filter > 4 || p->y >= SIDE) return 0;
+    if (p->y >= SIDE) return 0;
+    Byte *current = p->rows[p->y & 1], *row = current + 1;
+    const Byte *up = p->rows[(p->y & 1) ^ 1] + 1;
+    if (!unfilter(row,up,p->rowLen-1,p->channels,current[0])) return 0;
     Byte *out = p->bands[p->y >> 6] + (p->y & 63) * p->stride;
-    for (Word i = 0; filter && i + 1 < p->rowLen; i++) {
-        int l = i < bpp ? 0 : row[i-bpp];
-        int c = i < bpp ? 0 : up[i-bpp];
-        int a = up[i];
-        row[i] += filter == 1 ? l : filter == 2 ? a :
-            filter == 3 ? (l+a)/2 : paeth(l,a,c);
+    if (p->channels == 1 && p->depth == 8) {
+        for (Word x = 0; x < SIDE; ++x, out += 2) {
+            if (row[x] >= p->ncolors) return 0;
+            pixel565(out,p->colors[row[x]]);
+        }
+    } else if (p->channels == 1) {
+        Word mask = (1u << p->depth) - 1;
+        for (Word i = 0; i < p->rowLen-1; ++i) {
+            for (int shift = 8 - (int)p->depth; shift >= 0; shift -= (int)p->depth, out += 2) {
+                Word index = (row[i] >> shift) & mask;
+                if (index >= p->ncolors) return 0;
+                pixel565(out,p->colors[index]);
+            }
+        }
+    } else if (p->kind == 2 && !p->dark) {
+        for (Word x = 0; x < SIDE; ++x, row += 3, out += 2)
+            pixel565(out,rgb565(row[0],row[1],row[2]));
+    } else {
+        for (Word x = 0; x < SIDE; ++x, row += p->channels, out += 2) {
+            Word r = row[0];
+            Word g = p->kind == 4 ? r : row[1], b = p->kind == 4 ? r : row[2];
+            Word alpha = p->kind == 4 ? row[1] : p->kind == 6 ? row[3] : 255;
+            pixel565(out,renderColor(r,g,b,alpha,p->dark));
+        }
     }
-    for (Word x = 0; x < SIDE; ++x) {
-        Word r,g,b,alpha=255;
-        Word bit = x * p->depth;
-        Word sample = ((Word)row[bit >> 3] >> (8 - p->depth - (bit & 7))) &
-            ((1u << p->depth) - 1);
-        const Byte *pixel = row + x * p->channels;
-        switch (p->kind) {
-        case 3:
-            if (sample >= p->ncolors) return 0;
-            r=p->palette[sample][0]; g=p->palette[sample][1];
-            b=p->palette[sample][2]; alpha=p->palette[sample][3];
-            break;
-        case 0: r=g=b=sample*255/((1u << p->depth)-1); break;
-        case 4: r=g=b=pixel[0]; alpha=pixel[1]; break;
-        default:
-            r=pixel[0]; g=pixel[1]; b=pixel[2];
-            if (p->kind == 6) alpha=pixel[3];
-        }
-        if (alpha != 255) {
-            r = 255 - (255-r)*alpha/255;
-            g = 255 - (255-g)*alpha/255;
-            b = 255 - (255-b)*alpha/255;
-        }
-        if (p->dark) {
-            r = 26 + (255-r)*5/8;
-            g = 30 + (255-g)*5/8;
-            b = 39 + (255-b)*5/8;
-        }
-        Word packed = ((r & 248) << 8) | ((g & 252) << 3) | (b >> 3);
-        *out++ = packed >> 8;
-        *out++ = packed;
-    }
-    memcpy(up, row, p->rowLen-1);
     ++p->y;
     return 1;
 }
@@ -214,7 +265,7 @@ static int feed(Png *p, const Byte *data, Word size)
         int full = !p->z.avail_out;
         if (full) {
             if (!drawRow(p)) return 0;
-            p->z.next_out = p->row;
+            p->z.next_out = p->rows[p->y & 1];
             p->z.avail_out = p->y == SIDE ? 1 : p->rowLen;
         }
         if (status == Z_STREAM_END) {
@@ -249,7 +300,7 @@ static int decode(const Byte *data, Word size, Byte *const *bands, Word stride, 
     memset(p, 0, sizeof(*p));
     p->depth=depth; p->channels=channels; p->kind=kind; p->stride=stride;
     memcpy(p->bands,bands,sizeof(p->bands)); p->dark=dark; p->rowLen=1 + (SIDE*depth*channels)/8;
-    p->z.next_out=p->row; p->z.avail_out=p->rowLen;
+    p->z.next_out=p->rows[0]; p->z.avail_out=p->rowLen;
     p->z.opaque=&arena; p->z.zalloc=alloc; p->z.zfree=release;
     if (inflateInit(&p->z) != Z_OK) return 0;
     int result = 0, idat = 0, gap = 0;
@@ -259,7 +310,9 @@ static int decode(const Byte *data, Word size, Byte *const *bands, Word stride, 
         const Byte *chunk=data+i+8;
         i += n+12;
         if (tag == 0x49444154) {
-            if (gap || (kind==3 && !p->ncolors) || !feed(p,chunk,n)) break;
+            if (gap || (kind==3 && !p->ncolors)) break;
+            if (!idat) prepareColors(p);
+            if (!feed(p,chunk,n)) break;
             idat=1;
             continue;
         }
@@ -328,6 +381,7 @@ Word __attribute__((section(".entry"))) MapNative(void *emu, Byte *args, void *c
             be32(args+20),be32(args+24),(VectorLabels *)be32(args+28),(const void *)be32(args+32));
         return 1;
     }
+    if (command == nativeIndexScene) return VectorIndexScene(data,size,(void *)be32(args+12));
     if (command == nativeIndexLabels)
         return VectorIndexLabels(data,size,(Byte *)be32(args+12),(void *)be32(args+16));
     if (command == nativeLabelBitmap) {
@@ -338,7 +392,8 @@ Word __attribute__((section(".entry"))) MapNative(void *emu, Byte *args, void *c
     Byte *bands[4], *scratch = (Byte *)be32(args+28);
     for (unsigned i=0;i<4;++i) bands[i]=(Byte *)be32(args+12+i*4);
     if (command == nativeVectorDraw)
-        return VectorDraw(data,size,bands,scratch,be32(args+32),be32(args+36),be32(args+40));
+        return VectorDraw(data,size,bands,scratch,be32(args+32),be32(args+36),be32(args+40),
+            be32(args+44),(const void *)be32(args+48));
     if (command == nativePng) return decode(data,size,bands,512,scratch,be32(args+32));
     return 0;
 }

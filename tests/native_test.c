@@ -35,16 +35,30 @@ static void fixture(unsigned char *bits, unsigned char *scratch)
     cursor+=add_chunk(png+cursor,"IHDR",ihdr,sizeof(ihdr));
     cursor+=add_chunk(png+cursor,"PLTE",palette,sizeof(palette));
     for (unsigned y=0;y<256;++y) {
-        raw[y*33]=0;
-        memset(raw+y*33+1,y<64 ? 0xaa : 0x55,32);
+        unsigned filter=y%5, current=y<64 ? 0xaa : 0x55;
+        unsigned up=y==0 ? 0 : y<=64 ? 0xaa : 0x55;
+        raw[y*33]=filter;
+        for (unsigned x=0;x<32;++x) {
+            unsigned left=x ? current : 0;
+            // For a constant row, the upper-left sample equals up after
+            // the first byte, so Paeth picks left.
+            unsigned predictor=filter==0 ? 0 : filter==1 ? left :
+                filter==2 ? up : filter==3 ? (left+up)/2 : x ? left : up;
+            raw[y*33+1+x]=(unsigned char)(current-predictor);
+        }
     }
     unsigned long n=sizeof(zip);
     assert(compress(zip,&n,raw,sizeof(raw))==Z_OK);
-    cursor+=add_chunk(png+cursor,"IDAT",zip,(unsigned)n);
+    cursor+=add_chunk(png+cursor,"IDAT",zip,(unsigned)n/2);
+    cursor+=add_chunk(png+cursor,"IDAT",zip+n/2,(unsigned)(n-n/2));
     cursor+=add_chunk(png+cursor,"IEND",NULL,0);
     assert(MapDecode(png,cursor,bits,512,scratch));
     const unsigned char first[]={7,224,248,0}, second[]={248,0,7,224};
-    assert(!memcmp(bits,first,sizeof(first)) && !memcmp(bits+64*512,second,sizeof(second)));
+    for (unsigned y=0;y<256;++y) {
+        const unsigned char *pair=y<64 ? first : second;
+        for (unsigned x=0;x<512;x+=sizeof(first))
+            assert(!memcmp(bits+y*512+x,pair,sizeof(first)));
+    }
     png[45]^=1;
     assert(!MapDecode(png,cursor,bits,512,scratch));
     assert(!MapDecode(png,cursor-20,bits,512,scratch));
@@ -82,20 +96,37 @@ static void vector_fixture(unsigned char *bits, unsigned char *scratch)
     assert(VectorUnpack(mvt,sizeof(mvt),decoded,sizeof(decoded),scratch)==sizeof(mvt));
 
     unsigned char *bands[]={bits,bits+64*512,bits+128*512,bits+192*512};
-    assert(VectorDraw(decoded,sizeof(decoded),bands,scratch,0,0,0));
+    assert(VectorDraw(decoded,sizeof(decoded),bands,scratch,0,0,0,VECTOR_DEFAULT,NULL));
     unsigned building=pixel(bits,0,0), courtyard=pixel(bits,80,80);
     assert(building!=courtyard && pixel(bits,127,127)==courtyard &&
         pixel(bits,128,128)==building && pixel(bits,255,255)==building);
-    assert(VectorDraw(decoded,sizeof(decoded),bands,scratch,1,0,0));
+    assert(VectorDraw(decoded,sizeof(decoded),bands,scratch,1,0,0,VECTOR_DEFAULT,NULL));
     assert(pixel(bits,127,127)==building && pixel(bits,128,128)==courtyard &&
         pixel(bits,255,255)==courtyard);
-    assert(VectorDraw(decoded,sizeof(decoded),bands,scratch,1,1,0));
+    assert(VectorDraw(decoded,sizeof(decoded),bands,scratch,1,1,0,VECTOR_DEFAULT,NULL));
     assert(pixel(bits,0,255)==building);
-    assert(VectorDraw(decoded,sizeof(decoded),bands,scratch,5,31,31));
+    assert(VectorDraw(decoded,sizeof(decoded),bands,scratch,5,31,31,VECTOR_DEFAULT,NULL));
     assert(pixel(bits,0,0)==building && pixel(bits,255,255)==building);
-    assert(!VectorDraw(decoded,sizeof(decoded)-1,bands,scratch,0,0,0));
+    assert(VectorDraw(decoded,sizeof(decoded),bands,scratch,0,0,0,VECTOR_DEFAULT & ~vectorBuildings,NULL));
+    assert(pixel(bits,0,0)==courtyard && pixel(bits,255,255)==courtyard);
+    assert(VectorDraw(decoded,sizeof(decoded),bands,scratch,0,0,0,VECTOR_DEFAULT | vectorHighContrast,NULL));
+    assert(pixel(bits,0,0)!=building && pixel(bits,0,0)!=pixel(bits,80,80));
+    void *scene=malloc(VECTOR_SCENE_CAPACITY);
+    unsigned char *direct=malloc(256*512);
+    assert(scene && direct && VectorIndexScene(decoded,sizeof(decoded),scene));
+    for (unsigned y=0;y<4;++y) {
+        for (unsigned x=0;x<4;++x) {
+            assert(VectorDraw(decoded,sizeof(decoded),bands,scratch,2,x,y,VECTOR_DEFAULT,NULL));
+            memcpy(direct,bits,256*512);
+            assert(VectorDraw(decoded,sizeof(decoded),bands,scratch,2,x,y,VECTOR_DEFAULT,scene));
+            assert(!memcmp(direct,bits,256*512));
+        }
+    }
+    free(direct);
+    free(scene);
+    assert(!VectorDraw(decoded,sizeof(decoded)-1,bands,scratch,0,0,0,VECTOR_DEFAULT,NULL));
     decoded[19]=0;
-    assert(!VectorDraw(decoded,sizeof(decoded),bands,scratch,0,0,0));
+    assert(!VectorDraw(decoded,sizeof(decoded),bands,scratch,0,0,0,VECTOR_DEFAULT,NULL));
 }
 
 static void label_fixture(unsigned char *scratch)

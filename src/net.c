@@ -108,7 +108,9 @@ static Boolean StartLibraries(MapNet *n, Boolean forceTls12)
 static Int16 Collect(void *context, const UInt8 *data, UInt16 size)
 {
     MapNet *n=context;
-    if (n->parser.statusCode!=200 || size>MAP_BODY_MAX-n->length) return 1;
+    if (n->parser.statusCode!=200) return 1;
+    n->downloaded=size>0xffffffffUL-n->downloaded ? 0xffffffffUL : n->downloaded+size;
+    if (size>MAP_BODY_MAX-n->length) return 1;
     MemMove(n->body+n->length,data,size);
     n->length+=size;
     return 0;
@@ -134,7 +136,7 @@ Boolean MapNetStart(MapNet *n, const Char *url, const CacheMeta *cached, Boolean
     }
     if (!StartLibraries(n,forceTls12)) return false;
     n->requestLength=HttpBuildGetRequestEx(&n->url,0,NULL,false,
-        "PalmMap/0.1.9 (+https://github.com/palmsnipe)",vector,
+        "PalmMap/0.2.1 (+https://github.com/palmsnipe)",vector,
         n->request,sizeof(n->request));
     if (!n->requestLength) { Failed(n,"Tile URL is too long",0); return false; }
     n->conditional=false;
