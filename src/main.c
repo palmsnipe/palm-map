@@ -46,6 +46,7 @@ typedef struct {
     UInt32 used;
     CacheMeta meta;
     VectorLabels *labels;
+    UInt8 layer;
     Boolean fallback;
 } Tile;
 
@@ -115,7 +116,8 @@ static void Destroy(Tile *t)
 static Tile *Lookup(App *a, TileKey k)
 {
     for (UInt16 i=0;i<SLOTS;++i)
-        if (a->tiles[i].base[0] && SameTile(k,a->tiles[i].key)) return &a->tiles[i];
+        if (a->tiles[i].base[0] && a->tiles[i].layer==a->view.layer &&
+            SameTile(k,a->tiles[i].key)) return &a->tiles[i];
     return NULL;
 }
 
@@ -136,7 +138,7 @@ static Boolean Decode(App *a, TileKey k, const UInt8 *data, UInt32 n,
     MemSet(&next,sizeof(next),0);
     Tile *t=Lookup(a,k);
     if (!t) t=Vacant(a);
-    if (t->base[0] && !SameTile(t->key,k)) {
+    if (t->base[0] && (t->layer!=a->view.layer || !SameTile(t->key,k))) {
         // Recycle a displaced tile's bitmap bands and density wrappers.
         next=*t;
         MemSet(t,sizeof(*t),0);
@@ -228,7 +230,7 @@ static Boolean Decode(App *a, TileKey k, const UInt8 *data, UInt32 n,
         }
     }
     Destroy(t);
-    next.key=k; next.fallback=fallback; next.used=++a->useCount;
+    next.key=k; next.layer=a->view.layer; next.fallback=fallback; next.used=++a->useCount;
     next.meta=meta ? *meta : (CacheMeta){0};
     *t=next;
     return true;
@@ -885,6 +887,12 @@ static void NetworkFailure(App *a,UInt16 code)
     a->needWork=false;
 }
 
+static Boolean FromSource(const Tile *t, TileKey key, Boolean vector)
+{
+    return t->base[0] && t->layer!=overview && vector==(t->layer==shortbread) &&
+        SameTile(vector ? ParentKey(t->key) : t->key,key);
+}
+
 static Boolean CompleteTile(App *a, UInt16 step, Boolean vector)
 {
     UInt32 now=TimGetSeconds();
@@ -894,8 +902,7 @@ static Boolean CompleteTile(App *a, UInt16 step, Boolean vector)
     if (step==requestNotModified) {
         for (UInt16 i=0;i<SLOTS;++i) {
             Tile *t=a->tiles+i;
-            if (t->base[0] && SameTile(vector ? ParentKey(t->key) : t->key,key))
-                t->meta.expires=fresh;
+            if (FromSource(t,key,vector)) t->meta.expires=fresh;
         }
         if (vector && a->vectorSize && SameTile(a->vectorKey,key))
             a->vectorMeta.expires=fresh;
@@ -913,14 +920,14 @@ static Boolean CompleteTile(App *a, UInt16 step, Boolean vector)
             NetworkFailure(a,0);
             return true;
         }
-        for (UInt16 i=0;i<SLOTS;++i) {
-            Tile *t=a->tiles+i;
-            if (t->base[0] && !SameTile(t->key,a->loading) && SameTile(ParentKey(t->key),key))
-                Destroy(t);
-        }
     } else if (!Decode(a,a->loading,data,bytes,false,&renderMeta)) {
         NetworkFailure(a,0);
         return true;
+    }
+    Tile *updated=Lookup(a,a->loading);
+    for (UInt16 i=0;i<SLOTS;++i) {
+        Tile *t=a->tiles+i;
+        if (t!=updated && FromSource(t,key,vector)) Destroy(t);
     }
     if (meta.expires) CacheWrite(&a->cache,key,data,bytes,&meta);
     else CacheTouch(&a->cache,key,0);
@@ -1070,7 +1077,6 @@ static void Layer(App *a, UInt8 layer)
     a->view.layer=layer;
     if (a->view.z>MaxZoom(a)) a->view.z=MaxZoom(a);
     a->sourceId=SourceID(a);
-    for (UInt16 i=0;i<SLOTS;++i) Destroy(a->tiles+i);
     Retry(a);
 }
 
@@ -1353,7 +1359,6 @@ static Boolean MainEvent(App *a,FormType *f,EventType *e)
                     a->forceTls12=force;
                     PrefSetAppPreferences(CREATOR,HTTPS_PREF,VERSION,&force,sizeof(force),true);
                     a->sourceId=SourceID(a);
-                    for (UInt16 i=0;i<SLOTS;++i) Destroy(a->tiles+i);
                 }
                 Retry(a);
                 DrawMap(a);
@@ -1447,8 +1452,9 @@ static void SaveShortbreadOptions(App *a, FormType *f)
     if (!changed) return;
     a->vectorOptions=options;
     PrefSetAppPreferences(CREATOR,SHORTBREAD_PREF,VERSION,&options,sizeof(options),true);
-    if (a->view.layer==shortbread && (changed & VECTOR_TILE_OPTIONS))
-        for (UInt16 i=0;i<SLOTS;++i) Destroy(a->tiles+i);
+    if (changed & VECTOR_TILE_OPTIONS)
+        for (UInt16 i=0;i<SLOTS;++i)
+            if (a->tiles[i].layer==shortbread) Destroy(a->tiles+i);
 }
 
 static Boolean FormEvent(EventType *e)
