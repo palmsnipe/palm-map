@@ -1437,6 +1437,17 @@ static Boolean MainEvent(App *a,FormType *f,EventType *e)
             DrawMap(a);
             return true;
         }
+        if (e->data.menu.itemID==MenuGoToPin) {
+            if (a->view.pin) {
+                a->view.x=a->view.markX;
+                a->view.y=a->view.markY;
+                ViewportChanged(a);
+                DrawMap(a);
+            } else {
+                FrmAlert(NoPinAlert);
+            }
+            return true;
+        }
         if (e->data.menu.itemID==MenuClearPin) {
             if (a->view.pin) {
                 a->view.pin=false;
@@ -1658,6 +1669,7 @@ static void LoadPrefs(App *a)
         a->view.z=3;
     }
     a->view.name[sizeof(a->view.name)-1]=0;
+    if (a->view.markX>=WORLD || a->view.markY>=WORLD) a->view.pin=false;
     a->view.source[SOURCE_MAX]=0;
     a->view.layer=streets;
     UInt16 modeSize=sizeof(a->forceTls12);

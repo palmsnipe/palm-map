@@ -59,6 +59,7 @@ BEGIN
     PULLDOWN "Map"
     BEGIN
         MENUITEM "Find..." ID MenuFind "F"
+        MENUITEM "Go to pin" ID MenuGoToPin "P"
         MENUITEM "Clear pin" ID MenuClearPin
         MENUITEM "Retry tiles" ID MenuRetry "R"
         MENUITEM "Offline mode..." ID MenuOffline
@@ -81,7 +82,7 @@ END
 
 ALERT ID HelpAlert INFORMATION
 BEGIN
-    TITLE "About Map 0.2.2"
+    TITLE "About Map 0.2.3"
     MESSAGE "Drag the map or use the direction buttons. Use Find in the Map menu to search for places. Use the Layers menu to switch maps.\n\nMap data: OpenStreetMap contributors. Report issues: openstreetmap.org/fixthemap. Cycle Map: CyclOSM, hosted by OpenStreetMap France. Offline overview: Natural Earth. Place index: GeoNames (CC BY 4.0)."
     BUTTONS "OK"
 END
@@ -109,8 +110,8 @@ BEGIN
     BITMAP "small2x.bmp" BPP 8 DENSITY 144 TRANSPARENCY 255 0 255
 END
 APPLICATIONICONNAME ID 1000 "Map"
-VERSION ID 1000 "0.2.2"
-STRING ID 1000 "0.2.2"
+VERSION ID 1000 "0.2.3"
+STRING ID 1000 "0.2.3"
 ALERT ID MemoryAlert ERROR
 BEGIN
     TITLE "Map could not start"
@@ -132,4 +133,12 @@ BEGIN
     TITLE "Offline mode"
     MESSAGE "Current mode: ^1.\n\nOffline mode uses saved tiles and the built-in overview."
     BUTTONS "Offline" "Online" "Cancel"
+END
+
+
+ALERT ID NoPinAlert INFORMATION
+BEGIN
+    TITLE "No search pin"
+    MESSAGE "Find a place and show it on the map to set a pin."
+    BUTTONS "OK"
 END

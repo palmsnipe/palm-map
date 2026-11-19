@@ -44,3 +44,5 @@
 #define MenuOffline 1105
 #define MenuClearPin 1106
 #define OfflineAlert 1205
+#define MenuGoToPin 1107
+#define NoPinAlert 1206

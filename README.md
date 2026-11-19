@@ -10,7 +10,8 @@ Open **Map**. Drag with the stylus, pan with the directional buttons, or use
 **+** and **−** in the lower right of the map to change zoom. **Map → Find**
 searches over 34,000 cities offline. Try `Montreal` or `45.5017, -73.5673`,
 select a result, and tap **Show on map**. Exact city names appear first.
-Use **Map → Clear pin** to remove the search marker without moving the map.
+Use **Map → Go to pin** to return to the marker at the current zoom.
+**Map → Clear pin** removes the marker in place.
 Open the **Layers** menu and tap a layer to switch.
 
 - **Streets**: the standard OpenStreetMap raster style, zoom 0–19.
