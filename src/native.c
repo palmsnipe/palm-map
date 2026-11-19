@@ -140,6 +140,7 @@ typedef struct {
     Byte rows[2][1025], palette[256][4];
     unsigned short colors[256];
     Word rowLen, y, stride, kind, depth, channels, ncolors, dark;
+    Word cropSide, cropX, cropY, zoom;
     Byte *bands[4];
     int done;
 } Png;
@@ -216,13 +217,51 @@ static void pixel565(Byte *out, Word color)
     out[1] = color;
 }
 
+static Word trueColor(const Png *p, const Byte *row)
+{
+    Word r = row[0];
+    Word g = p->kind == 4 ? r : row[1], b = p->kind == 4 ? r : row[2];
+    Word alpha = p->kind == 4 ? row[1] : p->kind == 6 ? row[3] : 255;
+    return renderColor(r,g,b,alpha,p->dark);
+}
+
+static Byte *outputRow(const Png *p, Word y)
+{
+    return p->bands[y >> 6] + (y & 63) * p->stride;
+}
+
+static int previewRow(Png *p, const Byte *row, Word y)
+{
+    if (y < p->cropY || y >= p->cropY + p->cropSide) return 1;
+    Word displayY = (y-p->cropY) << p->zoom;
+    Word scale = 1u << p->zoom, mask = (1u << p->depth) - 1;
+    Byte *first = outputRow(p,displayY), *out = first;
+    for (Word x=p->cropX; x<p->cropX+p->cropSide; ++x) {
+        Word color;
+        if (p->channels == 1) {
+            Word bit = x*p->depth;
+            Word index = (row[bit >> 3] >> (8-p->depth-(bit & 7))) & mask;
+            if (index >= p->ncolors) return 0;
+            color = p->colors[index];
+        } else {
+            color = trueColor(p,row+x*p->channels);
+        }
+        for (Word copy=0; copy<scale; ++copy,out+=2) pixel565(out,color);
+    }
+    for (Word copy=1; copy<scale; ++copy)
+        memcpy(outputRow(p,displayY+copy),first,SIDE*2);
+    return 1;
+}
+
 static int drawRow(Png *p)
 {
     if (p->y >= SIDE) return 0;
     Byte *current = p->rows[p->y & 1], *row = current + 1;
     const Byte *up = p->rows[(p->y & 1) ^ 1] + 1;
     if (!unfilter(row,up,p->rowLen-1,p->channels,current[0])) return 0;
-    Byte *out = p->bands[p->y >> 6] + (p->y & 63) * p->stride;
+    Word y = p->y++;
+    if (p->zoom) return previewRow(p,row,y);
+    Byte *out = outputRow(p,y);
     if (p->channels == 1 && p->depth == 8) {
         for (Word x = 0; x < SIDE; ++x, out += 2) {
             if (row[x] >= p->ncolors) return 0;
@@ -241,14 +280,9 @@ static int drawRow(Png *p)
         for (Word x = 0; x < SIDE; ++x, row += 3, out += 2)
             pixel565(out,rgb565(row[0],row[1],row[2]));
     } else {
-        for (Word x = 0; x < SIDE; ++x, row += p->channels, out += 2) {
-            Word r = row[0];
-            Word g = p->kind == 4 ? r : row[1], b = p->kind == 4 ? r : row[2];
-            Word alpha = p->kind == 4 ? row[1] : p->kind == 6 ? row[3] : 255;
-            pixel565(out,renderColor(r,g,b,alpha,p->dark));
-        }
+        for (Word x = 0; x < SIDE; ++x, row += p->channels, out += 2)
+            pixel565(out,trueColor(p,row));
     }
-    ++p->y;
     return 1;
 }
 
@@ -277,8 +311,10 @@ static int feed(Png *p, const Byte *data, Word size)
     }
 }
 
-static int decode(const Byte *data, Word size, Byte *const *bands, Word stride, Byte *scratch, Word dark)
+static int decode(const Byte *data, Word size, Byte *const *bands, Word stride, Byte *scratch,
+    Word dark, Word zoom, Word childX, Word childY)
 {
+    if (zoom > 2 || childX >= (1u << zoom) || childY >= (1u << zoom)) return 0;
     if (size < 45 || be32(data) != 0x89504e47 || be32(data+4) != 0x0d0a1a0a ||
         be32(data+8) != 13 || be32(data+12) != 0x49484452 ||
         be32(data+16) != SIDE || be32(data+20) != SIDE || stride < SIDE*2 ||
@@ -299,6 +335,8 @@ static int decode(const Byte *data, Word size, Byte *const *bands, Word stride, 
     if (!p) return 0;
     memset(p, 0, sizeof(*p));
     p->depth=depth; p->channels=channels; p->kind=kind; p->stride=stride;
+    p->zoom=zoom; p->cropSide=SIDE >> zoom;
+    p->cropX=childX*p->cropSide; p->cropY=childY*p->cropSide;
     memcpy(p->bands,bands,sizeof(p->bands)); p->dark=dark; p->rowLen=1 + (SIDE*depth*channels)/8;
     p->z.next_out=p->rows[0]; p->z.avail_out=p->rowLen;
     p->z.opaque=&arena; p->z.zalloc=alloc; p->z.zfree=release;
@@ -364,7 +402,12 @@ static unsigned project(Byte *args)
 #ifdef MAP_HOST_TEST
 unsigned MapProject(Byte *args) { return project(args); }
 int MapDecode(const Byte *d, Word n, Byte *p, Word stride, Byte *scratch)
-{ Byte *bands[4]={p,p+64*stride,p+128*stride,p+192*stride}; return decode(d,n,bands,stride,scratch,0); }
+{ Byte *bands[4]={p,p+64*stride,p+128*stride,p+192*stride};
+    return decode(d,n,bands,stride,scratch,0,0,0,0); }
+int MapDecodePreview(const Byte *d, Word n, Byte *p, Word stride, Byte *scratch,
+    Word zoom, Word x, Word y)
+{ Byte *bands[4]={p,p+64*stride,p+128*stride,p+192*stride};
+    return decode(d,n,bands,stride,scratch,0,zoom,x,y); }
 #else
 Word __attribute__((section(".entry"))) MapNative(void *emu, Byte *args, void *callback)
 {
@@ -394,7 +437,9 @@ Word __attribute__((section(".entry"))) MapNative(void *emu, Byte *args, void *c
     if (command == nativeVectorDraw)
         return VectorDraw(data,size,bands,scratch,be32(args+32),be32(args+36),be32(args+40),
             be32(args+44),(const void *)be32(args+48));
-    if (command == nativePng) return decode(data,size,bands,512,scratch,be32(args+32));
+    if (command == nativePng)
+        return decode(data,size,bands,512,scratch,be32(args+32),be32(args+36),
+            be32(args+40),be32(args+44));
     return 0;
 }
 #endif

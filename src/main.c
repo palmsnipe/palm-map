@@ -33,6 +33,7 @@
 #define CYCLE_SOURCE 0x4f51e73aUL
 
 enum { streets, night, overview, custom, shortbread, cycle };
+enum { exactTile, overviewFallback, previewParent, previewGrandparent };
 typedef struct {
     UInt32 x,y,markX,markY;
     UInt8 z,layer;
@@ -46,8 +47,7 @@ typedef struct {
     UInt32 used;
     CacheMeta meta;
     VectorLabels *labels;
-    UInt8 layer;
-    Boolean fallback;
+    UInt8 layer, fallback;
 } Tile;
 
 typedef struct {
@@ -132,7 +132,7 @@ static Tile *Vacant(App *a)
 }
 
 static Boolean Decode(App *a, TileKey k, const UInt8 *data, UInt32 n,
-    Boolean fallback, const CacheMeta *meta)
+    UInt8 fallback, const CacheMeta *meta)
 {
     Tile next;
     MemSet(&next,sizeof(next),0);
@@ -147,7 +147,14 @@ static Boolean Decode(App *a, TileKey k, const UInt8 *data, UInt32 n,
     }
     // Some 5.x ROMs cannot allocate a single 128 KiB BmpCreate bitmap.
     UInt32 args[13]={nativePng,(UInt32)data,n,0,0,0,0,(UInt32)a->scratch,
-        a->view.layer==night && !fallback};
+        a->view.layer==night && fallback!=overviewFallback};
+    if (fallback>=previewParent) {
+        UInt16 shift=fallback-previewParent+1;
+        UInt32 mask=(1UL<<shift)-1;
+        args[9]=shift;
+        args[10]=k.x&mask;
+        args[11]=k.y&mask;
+    }
     Boolean vector=a->view.layer==shortbread;
     if (vector) {
         UInt16 shift=k.z>SHORTBREAD_MAX_Z ? k.z-SHORTBREAD_MAX_Z : 0;
@@ -247,7 +254,8 @@ static Boolean LoadOverview(App *a, TileKey k)
     MemHandle h=DmGetResource('wrld',index);
     if (!h) return false;
     const UInt8 *p=MemHandleLock(h);
-    Boolean ok=p && Decode(a,k,p,MemHandleSize(h),a->view.layer!=overview,NULL);
+    Boolean ok=p && Decode(a,k,p,MemHandleSize(h),
+        a->view.layer==overview ? exactTile : overviewFallback,NULL);
     if (p) MemHandleUnlock(h);
     DmReleaseResource(h);
     return ok;
@@ -296,12 +304,26 @@ static Boolean LoadCached(App *a, TileKey k)
     Boolean ok;
     if (vector) {
         ok=UnpackVector(a,parent,data,bytes,&meta) &&
-            Decode(a,k,a->vectorData,a->vectorSize,false,&meta);
+            Decode(a,k,a->vectorData,a->vectorSize,exactTile,&meta);
         if (!ok) a->vectorSize=0;
     } else {
-        ok=Decode(a,k,data,bytes,false,&meta);
+        ok=Decode(a,k,data,bytes,exactTile,&meta);
     }
     return ok;
+}
+
+static Boolean LoadRasterPreview(App *a, TileKey key)
+{
+    if (!a->offline || a->view.layer==shortbread) return false;
+    TileKey parent=key;
+    for (UInt8 kind=previewParent; kind<=previewGrandparent && parent.z; ++kind) {
+        --parent.z; parent.x>>=1; parent.y>>=1;
+        CacheMeta meta;
+        UInt32 bytes;
+        if (CacheRead(&a->cache,parent,&a->net.body,&a->net.bodyCapacity,&bytes,&meta) &&
+            Decode(a,key,a->net.body,bytes,kind,NULL)) return true;
+    }
+    return false;
 }
 
 static Int32 PixelUnits(const App *a) { return (WORLD>>a->view.z)/a->tileSide; }
@@ -724,6 +746,7 @@ static void DrawMap(App *a)
     Visible v[SLOTS];
     Tile *tiles[SLOTS];
     UInt16 count=VisibleTiles(a,v), drawn=0, offline=0;
+    Boolean preview=false;
     Boolean covered=count && v[0].y<=TOP && v[count-1].y+a->tileSide>=bottom;
     for (UInt16 i=0;i<count;++i) {
         tiles[i]=Lookup(a,v[i].key);
@@ -746,7 +769,8 @@ static void DrawMap(App *a)
                 WinDrawBitmap(t->dense[band] ? t->dense[band] : t->base[band],v[i].x,y);
         }
         ++drawn;
-        if (t->fallback) ++offline;
+        if (t->fallback==overviewFallback) ++offline;
+        if (t->fallback>=previewParent) preview=true;
     }
     if (!drawn) {
         WinSetTextColor(a->view.layer==night ? Color(225,234,234) : Color(45,79,79));
@@ -755,6 +779,16 @@ static void DrawMap(App *a)
             a->blocked ? "Map tiles unavailable" : "Loading map...";
         Coord x=(a->width-FntCharsWidth(status,StrLen(status)))/2;
         Text(status,x,TOP+(a->map.extent.y-FntLineHeight())/2,a->width-x-3);
+    }
+    if (preview) {
+        const Char *title="Cached preview";
+        FntSetFont(stdFont);
+        Coord width=FntCharsWidth(title,StrLen(title));
+        IndexedColorType paper=Color(243,247,239);
+        Fill(3,TOP+3,width+6,FntLineHeight()+2,paper);
+        WinSetBackColor(paper);
+        WinSetTextColor(Color(31,60,57));
+        Text(title,6,TOP+4,width);
     }
     // Composite the labels after the complete terrain bitmap pass.
     Marker marker={0};
@@ -937,12 +971,12 @@ static Boolean CompleteTile(App *a, UInt16 step, Boolean vector)
     renderMeta.expires=fresh;
     if (vector) {
         if (!UnpackVector(a,key,data,bytes,&renderMeta) ||
-            !Decode(a,a->loading,a->vectorData,a->vectorSize,false,&renderMeta)) {
+            !Decode(a,a->loading,a->vectorData,a->vectorSize,exactTile,&renderMeta)) {
             a->vectorSize=0;
             NetworkFailure(a,0);
             return true;
         }
-    } else if (!Decode(a,a->loading,data,bytes,false,&renderMeta)) {
+    } else if (!Decode(a,a->loading,data,bytes,exactTile,&renderMeta)) {
         NetworkFailure(a,0);
         return true;
     }
@@ -998,7 +1032,7 @@ static void Work(App *a)
         for (UInt16 i=0;i<count;++i) {
             TileKey key=v[order[i]].key;
             if (!SameTile(ParentKey(key),a->vectorKey) || Lookup(a,key)) continue;
-            if (Decode(a,key,a->vectorData,a->vectorSize,false,&a->vectorMeta)) {
+            if (Decode(a,key,a->vectorData,a->vectorSize,exactTile,&a->vectorMeta)) {
                 DrawMap(a);
                 return;
             }
@@ -1013,7 +1047,8 @@ static void Work(App *a)
         TileKey key=v[pos].key;
         Tile *t=Lookup(a,key);
         if (!t && (a->view.layer==overview ? LoadOverview(a,key) :
-              LoadCached(a,key) || (!vector && a->view.layer!=cycle && LoadOverview(a,key)))) {
+              LoadCached(a,key) || LoadRasterPreview(a,key) ||
+              (!vector && a->view.layer!=cycle && LoadOverview(a,key)))) {
             DrawMap(a);
             return;
         }

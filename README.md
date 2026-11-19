@@ -52,6 +52,8 @@ decimal kilobytes. It counts compressed tiles as received and stays unchanged
 when you use cached tiles. **Map → Offline mode** stops new tile downloads
 until you select **Online**. Cached tiles and the bundled Overview remain
 available, and the counter shows **Off** while offline mode is active.
+For raster layers, Map can enlarge tiles cached up to two zoom levels
+out. These views are marked **Cached preview**.
 
 ## Enable HTTPS
 

@@ -8,6 +8,8 @@
 
 int MapDecode(const unsigned char *png, unsigned len, unsigned char *pixels,
               unsigned stride, unsigned char *scratch);
+int MapDecodePreview(const unsigned char *png, unsigned len, unsigned char *pixels,
+    unsigned stride, unsigned char *scratch, unsigned zoom, unsigned x, unsigned y);
 unsigned MapProject(unsigned char *args);
 
 static void be(unsigned char *p, unsigned n)
@@ -59,6 +61,14 @@ static void fixture(unsigned char *bits, unsigned char *scratch)
         for (unsigned x=0;x<512;x+=sizeof(first))
             assert(!memcmp(bits+y*512+x,pair,sizeof(first)));
     }
+    assert(MapDecodePreview(png,cursor,bits,512,scratch,2,1,0));
+    const unsigned char expanded[]={7,224,7,224,7,224,7,224,248,0,248,0,248,0,248,0};
+    assert(!memcmp(bits,expanded,sizeof(expanded)) &&
+        !memcmp(bits+255*512,expanded,sizeof(expanded)));
+    assert(MapDecodePreview(png,cursor,bits,512,scratch,1,1,1));
+    const unsigned char lower[]={248,0,248,0,7,224,7,224};
+    assert(!memcmp(bits,lower,sizeof(lower)) && !memcmp(bits+255*512,lower,sizeof(lower)));
+    assert(!MapDecodePreview(png,cursor,bits,512,scratch,2,4,0));
     png[45]^=1;
     assert(!MapDecode(png,cursor,bits,512,scratch));
     assert(!MapDecode(png,cursor-20,bits,512,scratch));
