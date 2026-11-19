@@ -91,7 +91,9 @@ typedef struct {
     LocalID db;
     Place results[RESULTS];
     Char *choices[RESULTS];
-    UInt16 resultCount;
+    UInt16 resultCount, searchResource, searchOffset, searchLength;
+    UInt8 searchRanks[RESULTS];
+    Boolean searching;
     Char query[61];
     const Char *searchStatus;
 } App;
@@ -1262,66 +1264,115 @@ static void SearchText(App *a,FormType *f)
     (void)f;
 }
 
+static void ShowSearchResults(App *a, FormType *f)
+{
+    ListType *list=Object(f,ResultsList);
+    UInt16 count=a->searching ? 0 : a->resultCount;
+    for (UInt16 i=0;i<count;++i) a->choices[i]=a->results[i].label;
+    LstSetListChoices(list,a->choices,count);
+    LstSetSelection(list,count ? 0 : noListSelection);
+    if (count) LstSetTopItem(list,0);
+    LstDrawList(list);
+    ControlType *use=Object(f,UseButton);
+    CtlSetEnabled(use,count!=0);
+    CtlDrawControl(use);
+    SearchText(a,f);
+}
+
+static void EndSearch(App *a, FormType *f)
+{
+    a->searching=false;
+    a->searchStatus=a->resultCount ? "Select a result below" :
+        a->searchLength<2 ? "Enter a city or lat, lon" : "No places found";
+    ShowSearchResults(a,f);
+}
+
+static void AddPlace(App *a, const UInt8 *p, const Char *name, UInt16 len)
+{
+    UInt8 *ranks=a->searchRanks;
+    UInt8 rank=PlaceRank(name,len,a->query,a->searchLength,ranks[RESULTS-1]);
+    if (rank<=ranks[RESULTS-1]) return;
+    UInt16 pos=a->resultCount<RESULTS ? a->resultCount++ : RESULTS-1;
+    // Preserve the population order for equal matches.
+    while (pos && rank>ranks[pos-1]) {
+        a->results[pos]=a->results[pos-1];
+        ranks[pos]=ranks[pos-1];
+        --pos;
+    }
+    ranks[pos]=rank;
+    Place *result=a->results+pos;
+    result->x=ReadBE(p);
+    result->y=ReadBE(p+4);
+    StrNCopy(result->label,name,sizeof(result->label)-1);
+    result->label[sizeof(result->label)-1]=0;
+}
+
+static void SearchStep(App *a, FormType *f)
+{
+    UInt32 deadline=TimGetTicks()+1+SysTicksPerSecond()/50;
+    UInt16 examined=0;
+    while (a->searchRanks[RESULTS-1]!=3) {
+        MemHandle h=DmGetResource('city',a->searchResource);
+        if (!h) break;
+        const UInt8 *base=MemHandleLock(h);
+        Boolean pause=false;
+        if (base) {
+            UInt32 size=MemHandleSize(h);
+            const UInt8 *end=base+size;
+            const UInt8 *p=base+(a->searchOffset<=size ? a->searchOffset : size);
+            while (end-p>8 && a->searchRanks[RESULTS-1]!=3) {
+                const Char *name=(const Char *)p+8;
+                UInt16 len=0;
+                while (name+len<(const Char *)end && name[len]) ++len;
+                if (name+len>=(const Char *)end) break;
+                AddPlace(a,p,name,len);
+                p+=9+len;
+                ++examined;
+                if (!(examined&31) && (examined>=512 || (Int32)(TimGetTicks()-deadline)>=0)) {
+                    a->searchOffset=(UInt16)(p-base);
+                    pause=true;
+                    break;
+                }
+            }
+            MemHandleUnlock(h);
+        }
+        DmReleaseResource(h);
+        if (pause) return;
+        ++a->searchResource;
+        a->searchOffset=0;
+    }
+    EndSearch(a,f);
+}
+
 static void FindPlaces(App *a,FormType *f)
 {
     FieldType *field=Object(f,SearchField);
-    ListType *list=Object(f,ResultsList);
     const Char *s=FldGetTextPtr(field);
     while (s && *s==' ') ++s;
     if (s) StrNCopy(a->query,s,sizeof(a->query)-1); else a->query[0]=0;
     a->query[sizeof(a->query)-1]=0;
     UInt16 n=StrLen(a->query);
     while (n && a->query[n-1]==' ') a->query[--n]=0;
+    a->searchLength=n;
     a->resultCount=0;
-    if (Coordinates(a,a->query,a->results)) a->resultCount=1;
-    else if (n>=2) {
-        UInt8 ranks[RESULTS]={0};
-        for (UInt16 index=1000;ranks[RESULTS-1]!=3;++index) {
-            MemHandle h=DmGetResource('city',index);
-            if (!h) break;
-            const UInt8 *p=MemHandleLock(h);
-            if (p) {
-                const UInt8 *end=p+MemHandleSize(h);
-                while (end-p>8 && ranks[RESULTS-1]!=3) {
-                    const Char *name=(const Char *)p+8;
-                    UInt16 len=0;
-                    while (name+len<(const Char *)end && name[len]) ++len;
-                    if (name+len>=(const Char *)end) break;
-                    UInt8 rank=PlaceRank(name,len,a->query,n,ranks[RESULTS-1]);
-                    if (rank>ranks[RESULTS-1]) {
-                        UInt16 pos=a->resultCount<RESULTS ? a->resultCount++ : RESULTS-1;
-                        // Preserve the population order for equal matches.
-                        while (pos && rank>ranks[pos-1]) {
-                            a->results[pos]=a->results[pos-1];
-                            ranks[pos]=ranks[pos-1];
-                            --pos;
-                        }
-                        ranks[pos]=rank;
-                        Place *result=a->results+pos;
-                        result->x=ReadBE(p);
-                        result->y=ReadBE(p+4);
-                        StrNCopy(result->label,name,sizeof(result->label)-1);
-                        result->label[sizeof(result->label)-1]=0;
-                    }
-                    p+=9+len;
-                }
-                MemHandleUnlock(h);
-            }
-            DmReleaseResource(h);
-        }
+    if (Coordinates(a,a->query,a->results)) {
+        a->resultCount=1;
+        EndSearch(a,f);
+    } else if (n<2) {
+        EndSearch(a,f);
+    } else {
+        a->searchResource=1000;
+        a->searchOffset=0;
+        MemSet(a->searchRanks,sizeof(a->searchRanks),0);
+        a->searching=true;
+        a->searchStatus="Searching...";
+        ShowSearchResults(a,f);
     }
-    for (UInt16 i=0;i<a->resultCount;++i) a->choices[i]=a->results[i].label;
-    LstSetListChoices(list,a->choices,a->resultCount);
-    LstSetSelection(list,a->resultCount ? 0 : noListSelection);
-    if (a->resultCount) LstSetTopItem(list,0);
-    LstDrawList(list);
-    a->searchStatus=a->resultCount ? "Select a result below" :
-        n<2 ? "Enter a city or lat, lon" : "No places found";
-    SearchText(a,f);
 }
 
 static void UsePlace(App *a,FormType *f)
 {
+    if (a->searching) return;
     Int16 row=LstGetSelection(Object(f,ResultsList));
     if (row<0 || (UInt16)row>=a->resultCount) return;
     Place *p=a->results+row;
@@ -1525,7 +1576,9 @@ static Boolean FormEvent(EventType *e)
         if (id==SearchForm) {
             SetField(Object(f,SearchField),a->query);
             a->resultCount=0;
+            a->searching=false;
             a->searchStatus="Enter a city or lat, lon";
+            CtlSetEnabled(Object(f,UseButton),false);
         } else if (id==SourceForm) {
             SetField(Object(f,SourceField),a->view.source);
         } else if (id==ShortbreadForm) {
@@ -1544,7 +1597,10 @@ static Boolean FormEvent(EventType *e)
         return true;
     case ctlSelectEvent:
         switch (e->data.ctlSelect.controlID) {
-        case BackButton: case CancelButton: case CancelShortbread:
+        case BackButton:
+            a->searching=false;
+            FrmGotoForm(MainForm); return true;
+        case CancelButton: case CancelShortbread:
             FrmGotoForm(MainForm); return true;
         case ApplyShortbread:
             SaveShortbreadOptions(a,f);
@@ -1569,6 +1625,16 @@ static Boolean FormEvent(EventType *e)
             FrmGotoForm(MainForm);
             return true;
         }
+        }
+        break;
+    case fldChangedEvent:
+        if (id==SearchForm && a->searching) {
+            const Char *text=FldGetTextPtr(Object(f,SearchField));
+            if (!text || StrCompare(text,a->query)) {
+                a->resultCount=0;
+                a->searchLength=0;
+                EndSearch(a,f);
+            }
         }
         break;
     case keyDownEvent:
@@ -1641,8 +1707,12 @@ UInt32 PilotMain(UInt16 command,void *parameters,UInt16 flags)
     FrmGotoForm(MainForm);
     EventType event;
     do {
+        UInt16 active=FrmGetActiveFormID();
         Boolean pending=(a->needWork && !a->drag) || a->dragPending;
-        EvtGetEvent(&event,pending && FrmGetActiveFormID()==MainForm ? 2 : evtWaitForever);
+        Int32 wait=evtWaitForever;
+        if (active==MainForm && pending) wait=2;
+        if (active==SearchForm && a->searching) wait=1;
+        EvtGetEvent(&event,wait);
         if (event.eType==appStopEvent) break;
         UInt16 menuError=0;
         if (!SysHandleEvent(&event) && !MenuHandleEvent(NULL,&event,&menuError)) {
@@ -1654,8 +1724,13 @@ UInt32 PilotMain(UInt16 command,void *parameters,UInt16 flags)
                 FrmSetEventHandler(f,FormEvent);
             } else FrmDispatchEvent(&event);
         }
-        if (event.eType==nilEvent && FrmGetActiveFormID()==MainForm &&
-            WinGetActiveWindow()==FrmGetWindowHandle(FrmGetActiveForm())) Work(a);
+        if (event.eType==nilEvent) {
+            FormType *form=FrmGetActiveForm();
+            if (form && WinGetActiveWindow()==FrmGetWindowHandle(form)) {
+                if (FrmGetFormId(form)==MainForm) Work(a);
+                else if (FrmGetFormId(form)==SearchForm && a->searching) SearchStep(a,form);
+            }
+        }
     } while (true);
     FrmCloseAllForms();
     PrefSetAppPreferences(CREATOR,0,VERSION,&a->view,sizeof(a->view),true);
