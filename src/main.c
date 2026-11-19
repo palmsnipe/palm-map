@@ -872,6 +872,28 @@ static void Wake(App *a)
     a->settleAt=TimGetTicks()+SysTicksPerSecond()/7;
 }
 
+static void ViewportChanged(App *a)
+{
+    UInt32 now=TimGetTicks();
+    if (a->net.phase!=netIdle && (Int32)(now-a->net.deadline)<0) {
+        Boolean vector=a->view.layer==shortbread;
+        TileKey source=vector ? ParentKey(a->loading) : a->loading;
+        Visible visible[SLOTS];
+        UInt16 order[SLOTS];
+        UInt16 count=VisibleTiles(a,visible);
+        NearTiles(a,visible,count,order);
+        for (UInt16 i=0;i<count;++i) {
+            TileKey key=visible[order[i]].key;
+            if (!SameTile(source,vector ? ParentKey(key) : key)) continue;
+            a->loading=key;
+            a->needWork=true;
+            a->settleAt=now;
+            return;
+        }
+    }
+    Wake(a);
+}
+
 static void Retry(App *a)
 {
     a->blocked=false;
@@ -1040,7 +1062,7 @@ static void Zoom(App *a, Int16 amount)
 #ifdef MAP_VECTOR_BENCH
     a->unpackTicks=a->renderTicks=a->peakTicks=a->rendered=a->extractTicks=a->indexTicks=0;
 #endif
-    Wake(a);
+    ViewportChanged(a);
     DrawMap(a);
 }
 
@@ -1306,7 +1328,7 @@ static Boolean MainEvent(App *a,FormType *f,EventType *e)
     case winDisplayChangedEvent:
         Layout(a,f,MainForm);
         FrmDrawForm(f);
-        Wake(a); DrawMap(a); return true;
+        ViewportChanged(a); DrawMap(a); return true;
     case ctlSelectEvent:
         switch (e->data.ctlSelect.controlID) {
         case PlusButton: Zoom(a,1); return true;
@@ -1394,10 +1416,7 @@ static Boolean MainEvent(App *a,FormType *f,EventType *e)
             Boolean released=e->eType==penUpEvent;
             UInt32 now=TimGetTicks();
             if (dx || dy) {
-                if (!a->dragMoved) {
-                    MapNetStop(&a->net,false);
-                    a->dragFrame=now-SysTicksPerSecond();
-                }
+                if (!a->dragMoved) a->dragFrame=now-SysTicksPerSecond();
                 a->dragMoved=a->dragPending=true;
                 Pan(a,dx,dy);
                 a->dragX=e->screenX; a->dragY=e->screenY;
@@ -1405,7 +1424,7 @@ static Boolean MainEvent(App *a,FormType *f,EventType *e)
             PaintDrag(a,released);
             if (released) {
                 a->drag=false;
-                if (a->dragMoved) Wake(a);
+                if (a->dragMoved) ViewportChanged(a);
             }
             return true;
         }
@@ -1420,7 +1439,7 @@ static Boolean MainEvent(App *a,FormType *f,EventType *e)
         else if (key=='+' || key=='=') { Zoom(a,1); return true; }
         else if (key=='-') { Zoom(a,-1); return true; }
         else break;
-        Pan(a,dx,dy); Wake(a); DrawMap(a); return true;
+        Pan(a,dx,dy); ViewportChanged(a); DrawMap(a); return true;
     }
     default: break;
     }
