@@ -9,7 +9,9 @@ Install `build/Map.prc` with HotSync, from a card, or in CloudpilotEmu.
 Open **Map**. Drag with the stylus, pan with the directional buttons, or use
 **+** and **−** in the lower right of the map to change zoom. **Map → Find**
 searches over 34,000 cities offline. Try `Montreal` or `45.5017, -73.5673`,
-select a result, and tap **Show on map**. Open the **Layers** menu and tap a layer to switch.
+select a result, and tap **Show on map**. Exact city names appear first.
+Use **Map → Clear pin** to remove the search marker without moving the map.
+Open the **Layers** menu and tap a layer to switch.
 
 - **Streets**: the standard OpenStreetMap raster style, zoom 0–19.
 - **Night**: a darker rendering of the same OpenStreetMap tiles. Shares the
@@ -47,7 +49,9 @@ To retry after connecting, tap the footer or use **Map → Retry tiles**.
 
 The top-right counter shows tile data downloaded in the current launch in
 decimal kilobytes. It counts compressed tiles as received and stays unchanged
-when you use cached tiles.
+when you use cached tiles. **Map → Offline mode** stops new tile downloads
+until you select **Online**. Cached tiles and the bundled Overview remain
+available, and the counter shows **Off** while offline mode is active.
 
 ## Enable HTTPS
 

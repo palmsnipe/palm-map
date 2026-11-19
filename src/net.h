@@ -8,7 +8,6 @@
 
 enum { netIdle, netDns, netConnect, netConnecting, netTls, netHandshake, netWrite, netRead };
 enum { requestBusy, requestReady, requestNotModified, requestError };
-#define MAP_BODY_MAX (256UL * 1024)
 
 typedef struct {
     UInt32 age, date, expires, maxAge;
@@ -18,7 +17,7 @@ typedef struct {
 typedef struct {
     Boolean tlsOpen, tlsLoaded, netOpen, netLoaded, conditional, vector;
     UInt16 tls, net, phase, code, protocol;
-    UInt32 options, session, deadline, length, downloaded;
+    UInt32 options, session, deadline, length, downloaded, bodyCapacity;
     UInt16 requestLength, written;
     NetSocketRef socket;
     NetSocketAddrINType address;

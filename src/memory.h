@@ -15,4 +15,14 @@ static inline MemPtr MapAlloc(UInt32 size)
     return app ? MemChunkNew(0,size,
         (UInt16)(app->memOwnerID | memNewChunkFlagNonMovable | 0x1000)) : NULL;
 }
+static inline Boolean MapReserve(UInt8 **buffer, UInt32 *capacity, UInt32 bytes)
+{
+    if (*capacity>=bytes) return true;
+    UInt8 *next=MapAlloc(bytes);
+    if (!next) return false;
+    if (*buffer) MemPtrFree(*buffer);
+    *buffer=next;
+    *capacity=bytes;
+    return true;
+}
 #endif

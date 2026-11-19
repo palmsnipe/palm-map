@@ -6,6 +6,7 @@
 #define CREATOR 'PMap'
 #define WORLD ((Int32)0x10000000)
 #define BODY_CHUNK 60000UL
+#define MAP_BODY_MAX (256UL * 1024)
 
 typedef struct {
     UInt32 source;
@@ -21,11 +22,16 @@ typedef struct {
 
 typedef struct {
     DmOpenRef db;
+    struct CacheEntry *entries;
+    UInt16 count;
+    Boolean dirty, indexed;
 } TileCache;
 
 Boolean SameTile(TileKey a, TileKey b);
 void CacheOpen(TileCache *c);
-UInt8 *CacheRead(TileCache *c, TileKey k, UInt32 *size, CacheMeta *meta);
+void CacheClose(TileCache *c);
+Boolean CacheRead(TileCache *c, TileKey k, UInt8 **buffer, UInt32 *capacity,
+    UInt32 *size, CacheMeta *meta);
 void CacheWrite(TileCache *c, TileKey k, const UInt8 *data, UInt32 size, const CacheMeta *meta);
 void CacheTouch(TileCache *c, TileKey k, UInt32 expires);
 static inline UInt32 ReadBE(const UInt8 *p)

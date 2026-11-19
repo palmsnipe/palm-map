@@ -16,9 +16,31 @@ typedef struct {
     UInt8 z,part;
 } DiskHeader;
 
+typedef struct CacheEntry {
+    TileKey key;
+    UInt16 record;
+} CacheEntry;
+
 Boolean SameTile(TileKey a, TileKey b)
 {
     return a.source==b.source && a.x==b.x && a.y==b.y && a.z==b.z;
+}
+
+static TileKey HeaderKey(const DiskHeader *h) { return (TileKey){h->source,h->x,h->y,h->z}; }
+
+static Boolean Matches(const DiskHeader *h, TileKey k)
+{
+    return h->magic==MAGIC && SameTile(HeaderKey(h),k);
+}
+
+static Boolean ReadHeader(MemHandle h, DiskHeader *header)
+{
+    if (!h || MemHandleSize(h)<sizeof(*header)) return false;
+    const DiskHeader *p=MemHandleLock(h);
+    if (!p) return false;
+    *header=*p;
+    MemHandleUnlock(h);
+    return header->magic==MAGIC;
 }
 
 void CacheOpen(TileCache *c)
@@ -26,39 +48,55 @@ void CacheOpen(TileCache *c)
     c->db=DmOpenDatabaseByTypeCreator(CACHE_TYPE,CREATOR,dmModeReadWrite);
     if (!c->db && DmCreateDatabase(0,CACHE_NAME,CREATOR,CACHE_TYPE,false)==errNone)
         c->db=DmOpenDatabaseByTypeCreator(CACHE_TYPE,CREATOR,dmModeReadWrite);
+    if (c->db) c->entries=MemPtrNew(RECORD_LIMIT*sizeof(*c->entries));
+    c->dirty=true;
 }
 
-static Boolean Matches(const DiskHeader *h, TileKey k)
+void CacheClose(TileCache *c)
 {
-    return h->magic==MAGIC && h->source==k.source && h->x==k.x && h->y==k.y && h->z==k.z;
+    if (c->db) DmCloseDatabase(c->db);
+    if (c->entries) MemPtrFree(c->entries);
 }
 
-UInt8 *CacheRead(TileCache *c, TileKey k, UInt32 *size, CacheMeta *meta)
+static void BuildDirectory(TileCache *c)
 {
-    if (!c->db) return NULL;
-    UInt16 count=DmNumRecords(c->db);
-    for (UInt16 i=0;i<count;++i) {
-        MemHandle h=DmQueryRecord(c->db,i);
-        if (!h || MemHandleSize(h)<sizeof(DiskHeader)) continue;
-        DiskHeader *head=MemHandleLock(h);
-        if (!head) continue;
-        DiskHeader first=*head;
-        MemHandleUnlock(h);
-        if (!Matches(&first,k) || first.part || !first.length || first.length>256UL*1024)
-            continue;
-        UInt8 *pixels=MapAlloc(first.length);
-        if (!pixels) return NULL;
+    UInt16 records=DmNumRecords(c->db);
+    c->dirty=false;
+    c->indexed=c->entries && records<=RECORD_LIMIT;
+    c->count=0;
+    if (!c->indexed) return;
+    for (UInt16 i=0;i<records;++i) {
+        DiskHeader h;
+        if (ReadHeader(DmQueryRecord(c->db,i),&h) && !h.part)
+            c->entries[c->count++]=(CacheEntry){HeaderKey(&h),i};
+    }
+}
+
+Boolean CacheRead(TileCache *c, TileKey k, UInt8 **buffer, UInt32 *capacity,
+    UInt32 *size, CacheMeta *meta)
+{
+    if (!c->db) return false;
+    if (c->dirty) BuildDirectory(c);
+    UInt16 records=DmNumRecords(c->db), entries=c->indexed ? c->count : records;
+    for (UInt16 i=0;i<entries;++i) {
+        if (c->indexed && !SameTile(c->entries[i].key,k)) continue;
+        UInt16 record=c->indexed ? c->entries[i].record : i;
+        MemHandle h=DmQueryRecord(c->db,record);
+        DiskHeader first;
+        if (!ReadHeader(h,&first) || !Matches(&first,k) || first.part ||
+            !first.length || first.length>MAP_BODY_MAX) continue;
+        if (!MapReserve(buffer,capacity,first.length)) return false;
         UInt32 offset=0;
-        for (UInt16 j=i;j<count && offset<first.length;++j) {
+        for (UInt16 j=record;j<records && offset<first.length;++j) {
             UInt32 partSize=first.length-offset;
             if (partSize>BODY_CHUNK) partSize=BODY_CHUNK;
             h=DmQueryRecord(c->db,j);
             if (!h || MemHandleSize(h)!=sizeof(DiskHeader)+partSize) break;
-            head=MemHandleLock(h);
-            if (!head) break;
-            Boolean ok=Matches(head,k) && head->part==j-i &&
-                head->created==first.created && head->length==first.length;
-            if (ok) MemMove(pixels+offset,head+1,partSize);
+            const DiskHeader *part=MemHandleLock(h);
+            if (!part) break;
+            Boolean ok=Matches(part,k) && part->part==j-record &&
+                part->created==first.created && part->length==first.length;
+            if (ok) MemMove(*buffer+offset,part+1,partSize);
             MemHandleUnlock(h);
             if (!ok) break;
             offset+=partSize;
@@ -66,82 +104,96 @@ UInt8 *CacheRead(TileCache *c, TileKey k, UInt32 *size, CacheMeta *meta)
         if (offset==first.length) {
             *size=offset; *meta=first.meta;
             meta->validator[sizeof(meta->validator)-1]=0;
-            return pixels;
+            return true;
         }
-        MemPtrFree(pixels);
     }
-    return NULL;
+    return false;
 }
 
-static void MakeSpace(TileCache *c, TileKey k, UInt32 need)
+static void RemoveRange(TileCache *c, UInt16 first, UInt16 end)
+{
+    while (end>first) {
+        if (DmRemoveRecord(c->db,--end)!=errNone) break;
+        c->dirty=true;
+    }
+}
+
+static void Trim(TileCache *c, TileKey k, UInt16 kept)
 {
     UInt32 total=0;
-    UInt16 count=DmNumRecords(c->db);
-    for (UInt16 i=count;i>0;) {
-        --i;
-        MemHandle h=DmQueryRecord(c->db,i);
+    for (UInt16 i=DmNumRecords(c->db);i>0;) {
+        MemHandle h=DmQueryRecord(c->db,--i);
         if (!h) continue;
-        UInt32 n=MemHandleSize(h);
-        if (n<sizeof(DiskHeader)) continue;
-        DiskHeader *head=MemHandleLock(h);
-        if (!head) continue;
-        Boolean same=Matches(head,k);
-        MemHandleUnlock(h);
-        if (same && DmRemoveRecord(c->db,i)==errNone) continue;
-        total+=n;
+        DiskHeader head;
+        if (i>=kept && ReadHeader(h,&head) && Matches(&head,k) &&
+            DmRemoveRecord(c->db,i)==errNone) {
+            c->dirty=true;
+        } else {
+            total+=MemHandleSize(h);
+        }
     }
-    count=DmNumRecords(c->db);
-    while (count && (total+need>CACHE_LIMIT || count+5>RECORD_LIMIT)) {
-        MemHandle h=DmQueryRecord(c->db,count-1);
-        UInt32 n=h ? MemHandleSize(h) : 0;
-        if (DmRemoveRecord(c->db,--count)!=errNone) break;
-        total=total>n ? total-n : 0;
+    UInt16 count=DmNumRecords(c->db);
+    while (count>kept && (count>RECORD_LIMIT || total>CACHE_LIMIT)) {
+        UInt16 first=count-1;
+        DiskHeader tail, previous;
+        if (ReadHeader(DmQueryRecord(c->db,first),&tail) && tail.part<=4) {
+            for (UInt8 part=tail.part;part && first>kept;--part) {
+                if (!ReadHeader(DmQueryRecord(c->db,first-1),&previous) ||
+                    !Matches(&previous,HeaderKey(&tail)) || previous.part!=part-1 ||
+                    previous.created!=tail.created || previous.length!=tail.length) break;
+                --first;
+            }
+        }
+        // Remove complete old tiles rather than leaving their leading records orphaned.
+        for (UInt16 i=count;i>first;) {
+            MemHandle h=DmQueryRecord(c->db,--i);
+            if (h) total-=MemHandleSize(h);
+        }
+        RemoveRange(c,first,count);
+        UInt16 remaining=DmNumRecords(c->db);
+        if (remaining!=first) break;
+        count=first;
     }
 }
 
 void CacheWrite(TileCache *c, TileKey k, const UInt8 *data, UInt32 size, const CacheMeta *meta)
 {
-    if (!c->db || !meta->expires || !size) return;
-    MakeSpace(c,k,size+5*sizeof(DiskHeader));
+    if (!c->db || !meta->expires || !size || size>MAP_BODY_MAX) return;
     DiskHeader head={MAGIC,k.source,TimGetSeconds(),size,*meta,k.x,k.y,k.z,0};
     UInt32 off=0;
     UInt16 allocated=0;
+    // Keep a previous usable copy until all replacement parts have been written.
     while (off<size) {
-        UInt16 index=allocated;
+        UInt16 record=allocated;
         UInt32 n=size-off;
         if (n>BODY_CHUNK) n=BODY_CHUNK;
-        MemHandle h=DmNewRecord(c->db,&index,sizeof(head)+n);
+        MemHandle h=DmNewRecord(c->db,&record,sizeof(head)+n);
         if (!h) break;
         ++allocated;
+        c->dirty=true;
         void *p=MemHandleLock(h);
         Boolean ok=p && DmWrite(p,0,&head,sizeof(head))==errNone &&
             DmWrite(p,sizeof(head),data+off,n)==errNone;
         if (p) MemHandleUnlock(h);
-        if (DmReleaseRecord(c->db,index,ok)!=errNone || !ok) break;
+        if (DmReleaseRecord(c->db,record,ok)!=errNone || !ok) break;
         ++head.part;
         off+=n;
     }
-    if (off!=size) while (allocated--)
-        if (DmRemoveRecord(c->db,0)!=errNone) break;
+    if (off==size) Trim(c,k,allocated);
+    else RemoveRange(c,0,allocated);
 }
-
 
 void CacheTouch(TileCache *c, TileKey k, UInt32 expires)
 {
     if (!c->db) return;
     for (UInt16 i=DmNumRecords(c->db);i>0;) {
         --i;
-        MemHandle h=DmQueryRecord(c->db,i);
-        if (!h || MemHandleSize(h)<sizeof(DiskHeader)) continue;
-        DiskHeader *p=MemHandleLock(h);
-        if (!p) continue;
-        Boolean found=Matches(p,k);
-        MemHandleUnlock(h);
-        if (!found) continue;
-        if (!expires) { DmRemoveRecord(c->db,i); continue; }
-        h=DmGetRecord(c->db,i);
+        DiskHeader head;
+        if (!ReadHeader(DmQueryRecord(c->db,i),&head) || !Matches(&head,k)) continue;
+        if (!expires) { RemoveRange(c,i,i+1); continue; }
+        MemHandle h=DmGetRecord(c->db,i);
         if (!h) continue;
-        p=MemHandleLock(h);
+        void *p=MemHandleLock(h);
         Boolean ok=p && DmWrite(p,offsetof(DiskHeader,meta)+offsetof(CacheMeta,expires),
             &expires,sizeof(expires))==errNone;
         if (p) MemHandleUnlock(h);

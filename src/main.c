@@ -23,6 +23,7 @@
 #define VERSION 1
 #define HTTPS_PREF 1
 #define SHORTBREAD_PREF 2
+#define OFFLINE_PREF 3
 #define SOURCE_MAX 150
 #define OSM "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
 
@@ -61,7 +62,7 @@ typedef struct {
 typedef struct {
     Pref view;
     UInt16 vectorOptions;
-    UInt32 sourceId, useCount, retryAt, settleAt, lastCounter, counterAt;
+    UInt32 sourceId, useCount, retryAt, settleAt, lastCounter, counterAt, dragFrame;
     MapNet net;
     TileCache cache;
     Tile tiles[SLOTS];
@@ -84,7 +85,7 @@ typedef struct {
     UInt8 *scratch;
     RectangleType map;
     Coord width,height,tileSide,dragX,dragY;
-    Boolean highDensity,drag,needWork,blocked,diaLegacy,notify,forceTls12;
+    Boolean highDensity,drag,dragMoved,dragPending,needWork,blocked,diaLegacy,notify,forceTls12,offline;
     UInt16 card;
     LocalID db;
     Place results[RESULTS];
@@ -135,7 +136,13 @@ static Boolean Decode(App *a, TileKey k, const UInt8 *data, UInt32 n,
     MemSet(&next,sizeof(next),0);
     Tile *t=Lookup(a,k);
     if (!t) t=Vacant(a);
-    if (t->base[0] && !SameTile(t->key,k)) Destroy(t);
+    if (t->base[0] && !SameTile(t->key,k)) {
+        // Recycle a displaced tile's bitmap bands and density wrappers.
+        next=*t;
+        MemSet(t,sizeof(*t),0);
+        if (next.labels) MemPtrFree(next.labels);
+        next.labels=NULL;
+    }
     // Some 5.x ROMs cannot allocate a single 128 KiB BmpCreate bitmap.
     UInt32 args[13]={nativePng,(UInt32)data,n,0,0,0,0,(UInt32)a->scratch,
         a->view.layer==night && !fallback};
@@ -165,18 +172,20 @@ static Boolean Decode(App *a, TileKey k, const UInt8 *data, UInt32 n,
         args[12]=shift && a->sceneReady ? (UInt32)a->sceneIndex : 0;
     }
     for (UInt16 i=0;i<4;++i) {
-        UInt16 err=0,stride=0;
-        Coord w,h;
-        next.base[i]=BmpCreate(256,64,16,NULL,&err);
-        if (!next.base[i] || err) goto failed;
-        UInt8 *pixels=BmpGetBits(next.base[i]);
-        BmpGetDimensions(next.base[i],&w,&h,&stride);
-        if (!pixels || w!=256 || h!=64 || stride!=512) goto failed;
-        args[3+i]=(UInt32)pixels;
-        if (a->highDensity) {
-            next.dense[i]=(BitmapType *)BmpCreateBitmapV3(next.base[i],kDensityDouble,pixels,NULL);
-            if (!next.dense[i]) goto failed;
+        if (!next.base[i]) {
+            UInt16 err=0,stride=0;
+            Coord w,h;
+            next.base[i]=BmpCreate(256,64,16,NULL,&err);
+            if (!next.base[i] || err) goto failed;
+            UInt8 *pixels=BmpGetBits(next.base[i]);
+            BmpGetDimensions(next.base[i],&w,&h,&stride);
+            if (!pixels || w!=256 || h!=64 || stride!=512) goto failed;
+            if (a->highDensity) {
+                next.dense[i]=(BitmapType *)BmpCreateBitmapV3(next.base[i],kDensityDouble,pixels,NULL);
+                if (!next.dense[i]) goto failed;
+            }
         }
+        args[3+i]=(UInt32)BmpGetBits(next.base[i]);
     }
 #ifdef MAP_VECTOR_BENCH
     UInt32 started=TimGetTicks();
@@ -220,7 +229,7 @@ static Boolean Decode(App *a, TileKey k, const UInt8 *data, UInt32 n,
     }
     Destroy(t);
     next.key=k; next.fallback=fallback; next.used=++a->useCount;
-    if (meta) next.meta=*meta;
+    next.meta=meta ? *meta : (CacheMeta){0};
     *t=next;
     return true;
 failed:
@@ -279,8 +288,9 @@ static Boolean LoadCached(App *a, TileKey k)
     TileKey parent=vector ? ParentKey(k) : k;
     UInt32 bytes;
     CacheMeta meta;
-    UInt8 *data=CacheRead(&a->cache,parent,&bytes,&meta);
-    if (!data) return false;
+    if (!CacheRead(&a->cache,parent,&a->net.body,&a->net.bodyCapacity,&bytes,&meta))
+        return false;
+    const UInt8 *data=a->net.body;
     Boolean ok;
     if (vector) {
         ok=UnpackVector(a,parent,data,bytes,&meta) &&
@@ -289,7 +299,6 @@ static Boolean LoadCached(App *a, TileKey k)
     } else {
         ok=Decode(a,k,data,bytes,false,&meta);
     }
-    MemPtrFree(data);
     return ok;
 }
 
@@ -315,6 +324,22 @@ static UInt16 VisibleTiles(App *a, Visible *v)
         }
     }
     return count;
+}
+
+static void NearTiles(const App *a, const Visible *v, UInt16 count, UInt16 *order)
+{
+    UInt32 distance[SLOTS];
+    for (UInt16 i=0;i<count;++i) {
+        Int32 dx=v[i].x+a->tileSide/2-a->map.extent.x/2;
+        Int32 dy=v[i].y+a->tileSide/2-TOP-a->map.extent.y/2;
+        distance[i]=dx*dx+dy*dy;
+        UInt16 pos=i;
+        while (pos && distance[order[pos-1]]>distance[i]) {
+            order[pos]=order[pos-1];
+            --pos;
+        }
+        order[pos]=i;
+    }
 }
 
 static IndexedColorType Color(UInt8 r, UInt8 g, UInt8 b)
@@ -578,11 +603,14 @@ static UInt16 DrawLabels(App *a, const Visible *v, Tile *const *tiles, UInt16 co
     }
     IndexedColorType halo=Color(255,253,241), ink=Color(38,42,72);
     UInt16 oldCoord=WinSetCoordinateSystem(a->highDensity ? kCoordinatesDouble : kCoordinatesStandard);
+    UInt16 order[SLOTS];
+    NearTiles(a,v,count,order);
     for (UInt16 rank=5;rank>0;--rank) {
         Boolean landmark=rank>=4;
         if (!(a->vectorOptions & (landmark ? vectorLandmarks : vectorStreetNames))) continue;
-        for (UInt16 t=0;t<count && drawn<DRAWN_LABELS;++t) {
+        for (UInt16 pos=0;pos<count && drawn<DRAWN_LABELS;++pos) {
             if (landmark && landmarkCount>=DRAWN_LANDMARKS) break;
+            UInt16 t=order[pos];
             const VectorLabels *labels=tiles[t] ? tiles[t]->labels : NULL;
             if (!labels) continue;
             const VectorLabel *items=landmark ? labels->landmarks : labels->streets;
@@ -670,8 +698,8 @@ static void DrawDownloaded(App *a, Boolean force)
     WinSetBackColor(paper);
     WinSetTextColor(UIColorGetTableEntryIndex(UIFieldText));
     FntSetFont(stdFont);
-    Char text[20];
-    StrPrintF(text,"%lu.%u kB",value/10,(UInt16)(value%10));
+    Char text[24];
+    StrPrintF(text,"%s%lu.%u kB",a->offline ? "Off " : "",value/10,(UInt16)(value%10));
     Coord x=a->width-4-FntCharsWidth(text,StrLen(text));
     WinDrawChars(text,StrLen(text),x,1);
     WinSetClip(&clip);
@@ -721,7 +749,8 @@ static void DrawMap(App *a)
     if (!drawn) {
         WinSetTextColor(a->view.layer==night ? Color(225,234,234) : Color(45,79,79));
         FntSetFont(boldFont);
-        const Char *status=a->blocked ? "Map tiles unavailable" : "Loading map...";
+        const Char *status=a->offline && a->view.layer!=overview ? "No cached tiles here" :
+            a->blocked ? "Map tiles unavailable" : "Loading map...";
         Coord x=(a->width-FntCharsWidth(status,StrLen(status)))/2;
         Text(status,x,TOP+(a->map.extent.y-FntLineHeight())/2,a->width-x-3);
     }
@@ -898,9 +927,22 @@ static Boolean CompleteTile(App *a, UInt16 step, Boolean vector)
     return true;
 }
 
+static void PaintDrag(App *a, Boolean final)
+{
+    if (a->dragPending && (final || TimGetTicks()-a->dragFrame>=SysTicksPerSecond()/20)) {
+        DrawMap(a);
+        a->dragPending=false;
+        a->dragFrame=TimGetTicks();
+    }
+}
+
 static void Work(App *a)
 {
-    if (a->drag || !a->needWork || (Int32)(TimGetTicks()-a->settleAt)<0) return;
+    if (a->drag) {
+        PaintDrag(a,false);
+        return;
+    }
+    if (!a->needWork || (Int32)(TimGetTicks()-a->settleAt)<0) return;
     Boolean vector=a->view.layer==shortbread;
     if (a->net.phase!=netIdle) {
         UInt16 step=MapNetStep(&a->net);
@@ -918,14 +960,16 @@ static void Work(App *a)
     }
 
     Visible v[SLOTS];
-    UInt16 count=VisibleTiles(a,v), best=count;
-    Int32 distance=0x7fffffffL;
+    UInt16 order[SLOTS];
+    UInt16 count=VisibleTiles(a,v), missing=count, expired=count;
+    NearTiles(a,v,count,order);
     UInt32 now=TimGetSeconds();
     if (vector && a->vectorSize) {
         // Finish all visible children before loading a different parent.
         for (UInt16 i=0;i<count;++i) {
-            if (!SameTile(ParentKey(v[i].key),a->vectorKey) || Lookup(a,v[i].key)) continue;
-            if (Decode(a,v[i].key,a->vectorData,a->vectorSize,false,&a->vectorMeta)) {
+            TileKey key=v[order[i]].key;
+            if (!SameTile(ParentKey(key),a->vectorKey) || Lookup(a,key)) continue;
+            if (Decode(a,key,a->vectorData,a->vectorSize,false,&a->vectorMeta)) {
                 DrawMap(a);
                 return;
             }
@@ -936,19 +980,24 @@ static void Work(App *a)
         }
     }
     for (UInt16 i=0;i<count;++i) {
-        Tile *t=Lookup(a,v[i].key);
-        if (!t && (a->view.layer==overview ? LoadOverview(a,v[i].key) :
-              LoadCached(a,v[i].key) || (!vector && a->view.layer!=cycle && LoadOverview(a,v[i].key)))) {
+        UInt16 pos=order[i];
+        TileKey key=v[pos].key;
+        Tile *t=Lookup(a,key);
+        if (!t && (a->view.layer==overview ? LoadOverview(a,key) :
+              LoadCached(a,key) || (!vector && a->view.layer!=cycle && LoadOverview(a,key)))) {
             DrawMap(a);
             return;
         }
-        if (t && !t->fallback && (t->meta.expires==0 || t->meta.expires>now)) continue;
-        Int32 dx=v[i].x+a->tileSide/2-a->width/2, dy=v[i].y+a->tileSide/2-TOP-a->map.extent.y/2;
-        Int32 d=dx*dx+dy*dy;
-        if (d<distance) { best=i; distance=d; }
+        if (!t || t->fallback) {
+            if (missing==count) missing=pos;
+        } else if (expired==count && t->meta.expires && t->meta.expires<=now) {
+            expired=pos;
+        }
     }
+    // Fill the visible gaps before refreshing any tile already on screen.
+    UInt16 best=missing!=count ? missing : expired;
     Boolean wasBlocked=a->blocked;
-    if (a->view.layer==overview || best==count ||
+    if (a->offline || a->view.layer==overview || best==count ||
         (a->blocked && (Int32)(TimGetTicks()-a->retryAt)<0)) {
         a->needWork=false;
     } else if (a->view.layer==custom && !a->view.source[0]) {
@@ -1123,11 +1172,18 @@ static Boolean Coordinates(App *a,const Char *s,Place *p)
     return true;
 }
 
-static Boolean Contains(const Char *name,const Char *query,UInt16 n)
+static UInt8 PlaceRank(const Char *name, UInt16 len, const Char *query, UInt16 n,
+    UInt8 cutoff)
 {
-    for (UInt16 left=StrLen(name);left>=n;--left,++name)
-        if (!StrNCaselessCompare(name,query,n)) return true;
-    return false;
+    if (len<n) return 0;
+    if (!StrNCaselessCompare(name,query,n)) {
+        // GeoNames records end in ", XX". Match with or without the country.
+        return len==n || (len-n==4 && name[n]==',' && name[n+1]==' ') ? 3 : 2;
+    }
+    if (cutoff<=1 && len>n)
+        for (UInt16 offset=1;offset<=len-n;++offset)
+            if (!StrNCaselessCompare(name+offset,query,n)) return 1;
+    return 0;
 }
 
 static void SearchText(App *a,FormType *f)
@@ -1156,33 +1212,40 @@ static void FindPlaces(App *a,FormType *f)
     a->resultCount=0;
     if (Coordinates(a,a->query,a->results)) a->resultCount=1;
     else if (n>=2) {
-        // Prefer names beginning with the query, ordered by population.
-        for (UInt16 pass=0;pass<2 && a->resultCount<RESULTS;++pass)
-            for (UInt16 index=1000;a->resultCount<RESULTS;++index) {
-                MemHandle h=DmGetResource('city',index);
-                if (!h) break;
-                const UInt8 *p=MemHandleLock(h);
-                if (p) {
-                    const UInt8 *end=p+MemHandleSize(h);
-                    while (end-p>8 && a->resultCount<RESULTS) {
-                        const Char *name=(const Char *)p+8;
-                        UInt16 len=0;
-                        while (name+len<(const Char *)end && name[len]) ++len;
-                        if (name+len>=(const Char *)end) break;
-                        Boolean prefix=len>=n && !StrNCaselessCompare(name,a->query,n);
-                        if ((pass==0 && prefix) || (pass==1 && !prefix && Contains(name,a->query,n))) {
-                            Place *result=a->results+a->resultCount++;
-                            result->x=ReadBE(p);
-                            result->y=ReadBE(p+4);
-                            StrNCopy(result->label,name,sizeof(result->label)-1);
-                            result->label[sizeof(result->label)-1]=0;
+        UInt8 ranks[RESULTS]={0};
+        for (UInt16 index=1000;ranks[RESULTS-1]!=3;++index) {
+            MemHandle h=DmGetResource('city',index);
+            if (!h) break;
+            const UInt8 *p=MemHandleLock(h);
+            if (p) {
+                const UInt8 *end=p+MemHandleSize(h);
+                while (end-p>8 && ranks[RESULTS-1]!=3) {
+                    const Char *name=(const Char *)p+8;
+                    UInt16 len=0;
+                    while (name+len<(const Char *)end && name[len]) ++len;
+                    if (name+len>=(const Char *)end) break;
+                    UInt8 rank=PlaceRank(name,len,a->query,n,ranks[RESULTS-1]);
+                    if (rank>ranks[RESULTS-1]) {
+                        UInt16 pos=a->resultCount<RESULTS ? a->resultCount++ : RESULTS-1;
+                        // Preserve the population order for equal matches.
+                        while (pos && rank>ranks[pos-1]) {
+                            a->results[pos]=a->results[pos-1];
+                            ranks[pos]=ranks[pos-1];
+                            --pos;
                         }
-                        p+=9+len;
+                        ranks[pos]=rank;
+                        Place *result=a->results+pos;
+                        result->x=ReadBE(p);
+                        result->y=ReadBE(p+4);
+                        StrNCopy(result->label,name,sizeof(result->label)-1);
+                        result->label[sizeof(result->label)-1]=0;
                     }
-                    MemHandleUnlock(h);
+                    p+=9+len;
                 }
-                DmReleaseResource(h);
+                MemHandleUnlock(h);
             }
+            DmReleaseResource(h);
+        }
     }
     for (UInt16 i=0;i<a->resultCount;++i) a->choices[i]=a->results[i].label;
     LstSetListChoices(list,a->choices,a->resultCount);
@@ -1204,8 +1267,8 @@ static void UsePlace(App *a,FormType *f)
     a->view.pin=true;
     StrNCopy(a->view.name,p->label,sizeof(a->view.name)-1);
     a->view.name[sizeof(a->view.name)-1]=0;
-    a->view.z=a->view.layer==overview ? OVERVIEW_Z :
-        (a->blocked ? OVERVIEW_Z : 12);
+    if (a->view.layer==overview) a->view.z=OVERVIEW_Z;
+    else if (!a->offline) a->view.z=a->blocked ? OVERVIEW_Z : 12;
     FrmGotoForm(MainForm);
 }
 
@@ -1260,7 +1323,28 @@ static Boolean MainEvent(App *a,FormType *f,EventType *e)
             DrawMap(a);
             return true;
         }
-        if (e->data.menu.itemID==MenuRetry) { Retry(a); DrawMap(a); return true; }
+        if (e->data.menu.itemID==MenuClearPin) {
+            if (a->view.pin) {
+                a->view.pin=false;
+                a->view.name[0]=0;
+                DrawMap(a);
+            }
+            return true;
+        }
+        if (e->data.menu.itemID==MenuOffline) {
+            UInt16 choice=FrmCustomAlert(OfflineAlert,a->offline ? "Offline" : "Online",NULL,NULL);
+            if (choice<2 && a->offline!=(choice==0)) {
+                a->offline=choice==0;
+                PrefSetAppPreferences(CREATOR,OFFLINE_PREF,VERSION,&a->offline,sizeof(a->offline),true);
+                Retry(a);
+                DrawMap(a);
+            }
+            return true;
+        }
+        if (e->data.menu.itemID==MenuRetry) {
+            if (!a->offline) { Retry(a); DrawMap(a); }
+            return true;
+        }
         if (e->data.menu.itemID==MenuHttps) {
             UInt16 choice=FrmCustomAlert(HttpsAlert,a->forceTls12 ? "TLS 1.2" : "Modern",NULL,NULL);
             if (choice<2) {
@@ -1282,15 +1366,18 @@ static Boolean MainEvent(App *a,FormType *f,EventType *e)
         }
         break;
     case penDownEvent:
-        if (e->screenY>=a->height-FOOT) { Retry(a); DrawMap(a); return true; }
+        if (e->screenY>=a->height-FOOT) {
+            if (!a->offline) { Retry(a); DrawMap(a); }
+            return true;
+        }
         if (RctPtInRectangle(e->screenX,e->screenY,&a->map)) {
             RectangleType bounds;
             FrmGetObjectBounds(f,FrmGetObjectIndex(f,PlusButton),&bounds);
             if (RctPtInRectangle(e->screenX,e->screenY,&bounds)) return false;
             FrmGetObjectBounds(f,FrmGetObjectIndex(f,MinusButton),&bounds);
             if (RctPtInRectangle(e->screenX,e->screenY,&bounds)) return false;
-            MapNetStop(&a->net,false);
             a->drag=true;
+            a->dragMoved=a->dragPending=false;
             a->dragX=e->screenX; a->dragY=e->screenY;
             return true;
         }
@@ -1299,12 +1386,22 @@ static Boolean MainEvent(App *a,FormType *f,EventType *e)
     case penUpEvent:
         if (a->drag) {
             Int16 dx=a->dragX-e->screenX,dy=a->dragY-e->screenY;
+            Boolean released=e->eType==penUpEvent;
+            UInt32 now=TimGetTicks();
             if (dx || dy) {
+                if (!a->dragMoved) {
+                    MapNetStop(&a->net,false);
+                    a->dragFrame=now-SysTicksPerSecond();
+                }
+                a->dragMoved=a->dragPending=true;
                 Pan(a,dx,dy);
                 a->dragX=e->screenX; a->dragY=e->screenY;
-                DrawMap(a);
             }
-            if (e->eType==penUpEvent) { a->drag=false; Wake(a); }
+            PaintDrag(a,released);
+            if (released) {
+                a->drag=false;
+                if (a->dragMoved) Wake(a);
+            }
             return true;
         }
         break;
@@ -1441,6 +1538,10 @@ static void LoadPrefs(App *a)
     if (PrefGetAppPreferences(CREATOR,HTTPS_PREF,&a->forceTls12,&modeSize,true)!=VERSION ||
         modeSize!=sizeof(a->forceTls12) || a->forceTls12>true)
         a->forceTls12=true;
+    UInt16 offlineSize=sizeof(a->offline);
+    if (PrefGetAppPreferences(CREATOR,OFFLINE_PREF,&a->offline,&offlineSize,true)!=VERSION ||
+        offlineSize!=sizeof(a->offline) || a->offline>true)
+        a->offline=false;
     UInt16 optionsSize=sizeof(a->vectorOptions);
     if (PrefGetAppPreferences(CREATOR,SHORTBREAD_PREF,&a->vectorOptions,&optionsSize,true)!=VERSION ||
         optionsSize!=sizeof(a->vectorOptions) || (a->vectorOptions & ~VECTOR_OPTION_MASK))
@@ -1480,7 +1581,8 @@ UInt32 PilotMain(UInt16 command,void *parameters,UInt16 flags)
     FrmGotoForm(MainForm);
     EventType event;
     do {
-        EvtGetEvent(&event,a->needWork && FrmGetActiveFormID()==MainForm ? 2 : evtWaitForever);
+        Boolean pending=(a->needWork && !a->drag) || a->dragPending;
+        EvtGetEvent(&event,pending && FrmGetActiveFormID()==MainForm ? 2 : evtWaitForever);
         if (event.eType==appStopEvent) break;
         UInt16 menuError=0;
         if (!SysHandleEvent(&event) && !MenuHandleEvent(NULL,&event,&menuError)) {
@@ -1499,7 +1601,7 @@ UInt32 PilotMain(UInt16 command,void *parameters,UInt16 flags)
     PrefSetAppPreferences(CREATOR,0,VERSION,&a->view,sizeof(a->view),true);
     if (a->notify) SysNotifyUnregister(a->card,a->db,sysNotifyDisplayResizedEvent,sysNotifyNormalPriority);
     MapNetClose(&a->net);
-    if (a->cache.db) DmCloseDatabase(a->cache.db);
+    CacheClose(&a->cache);
     for (UInt16 i=0;i<SLOTS;++i) Destroy(a->tiles+i);
     FtrUnregister(CREATOR,0);
     result=errNone;

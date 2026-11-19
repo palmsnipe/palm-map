@@ -41,3 +41,6 @@
 #define CancelShortbread 1041
 #define MenuLayerCycle 1115
 #define MenuShortbreadSettings 1116
+#define MenuOffline 1105
+#define MenuClearPin 1106
+#define OfflineAlert 1205
