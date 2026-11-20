@@ -137,7 +137,7 @@ Boolean MapNetStart(MapNet *n, const Char *url, const CacheMeta *cached, Boolean
     }
     if (!StartLibraries(n,forceTls12)) return false;
     n->requestLength=HttpBuildGetRequestEx(&n->url,0,NULL,false,
-        "PalmMap/0.2.3 (+https://github.com/palmsnipe)",vector,
+        "PalmMap/0.2.4 (+https://github.com/palmsnipe)",vector,
         n->request,sizeof(n->request));
     if (!n->requestLength) { Failed(n,"Tile URL is too long",0); return false; }
     n->conditional=false;
