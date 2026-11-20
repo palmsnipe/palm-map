@@ -90,9 +90,6 @@ static Boolean StartLibraries(MapNet *n, Boolean forceTls12)
         n->trustSize=MemHandleSize(n->roots);
     }
     if (!n->trust) { Failed(n,"Missing CA certificates",0); return false; }
-    if (!MapReserve(&n->body,&n->bodyCapacity,MAP_BODY_MAX)) {
-        Failed(n,"Not enough memory",0); return false;
-    }
     if (n->netOpen) return true;
     UInt16 interfaces=0;
     e=SysLibFind("Net.lib",&n->net);
@@ -112,6 +109,16 @@ static Int16 Collect(void *context, const UInt8 *data, UInt16 size)
     if (n->parser.statusCode!=200) return 1;
     n->downloaded=size>0xffffffffUL-n->downloaded ? 0xffffffffUL : n->downloaded+size;
     if (size>MAP_BODY_MAX-n->length) return 1;
+    UInt32 bytes=n->length+size;
+    if (n->parser.hasContentLength && !n->parser.chunked) {
+        bytes=n->parser.contentLength;
+        if (bytes>MAP_BODY_MAX) return 1;
+    } else if (bytes>n->bodyCapacity) {
+        UInt32 grown=n->bodyCapacity ? n->bodyCapacity*2 : 32768UL;
+        if (grown>MAP_BODY_MAX) grown=MAP_BODY_MAX;
+        if (grown>bytes) bytes=grown;
+    }
+    if (!MapGrow(&n->body,&n->bodyCapacity,bytes,n->length)) return 1;
     MemMove(n->body+n->length,data,size);
     n->length+=size;
     return 0;
@@ -137,7 +144,7 @@ Boolean MapNetStart(MapNet *n, const Char *url, const CacheMeta *cached, Boolean
     }
     if (!StartLibraries(n,forceTls12)) return false;
     n->requestLength=HttpBuildGetRequestEx(&n->url,0,NULL,false,
-        "PalmMap/0.2.5 (+https://github.com/palmsnipe)",vector,
+        "PalmMap/0.2.6 (+https://github.com/palmsnipe)",vector,
         n->request,sizeof(n->request));
     if (!n->requestLength) { Failed(n,"Tile URL is too long",0); return false; }
     n->conditional=false;

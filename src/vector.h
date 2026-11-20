@@ -2,8 +2,19 @@
 #ifndef MAP_VECTOR_H
 #define MAP_VECTOR_H
 
+#include <stdint.h>
+
 #define SHORTBREAD_MAX_Z 14
-#define VECTOR_CAPACITY (768UL * 1024)
+#define VECTOR_MAX_DECODED (2UL * 1024 * 1024)
+
+static inline uint32_t VectorExpectedSize(const unsigned char *data, uint32_t size)
+{
+    if (size<2 || data[0]!=0x1f || data[1]!=0x8b) return size;
+    if (size<18) return 0;
+    const unsigned char *length=data+size-4;
+    return (uint32_t)length[0] | (uint32_t)length[1]<<8 |
+        (uint32_t)length[2]<<16 | (uint32_t)length[3]<<24;
+}
 
 enum { nativePng, nativeProject, nativeVectorUnpack, nativeVectorDraw, nativeVectorLabels,
     nativeIndexLabels, nativeLabelBitmap, nativeIndexScene };

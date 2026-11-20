@@ -90,7 +90,7 @@ END
 
 ALERT ID HelpAlert INFORMATION
 BEGIN
-    TITLE "About Map 0.2.5"
+    TITLE "About Map 0.2.6"
     MESSAGE "OpenStreetMap contributors\nopenstreetmap.org\n/fixthemap\nCyclOSM / OSM France\nNatural Earth\nGeoNames (CC BY 4.0)"
     BUTTONS "OK"
 END
@@ -118,8 +118,8 @@ BEGIN
     BITMAP "small2x.bmp" BPP 8 DENSITY 144 TRANSPARENCY 255 0 255
 END
 APPLICATIONICONNAME ID 1000 "Map"
-VERSION ID 1000 "0.2.5"
-STRING ID 1000 "0.2.5"
+VERSION ID 1000 "0.2.6"
+STRING ID 1000 "0.2.6"
 ALERT ID MemoryAlert ERROR
 BEGIN
     TITLE "Map could not start"

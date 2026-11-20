@@ -71,7 +71,7 @@ typedef struct {
     TileKey loading, vectorKey;
     CacheMeta vectorMeta;
     UInt8 *vectorData;
-    UInt32 vectorSize;
+    UInt32 vectorSize, vectorCapacity;
     void *labelIndex, *sceneIndex;
     Boolean indexReady, indexTried, sceneReady, sceneTried, labelPainterTried;
     BitmapType *labelBase, *labelBitmap;
@@ -290,10 +290,11 @@ static TileKey ParentKey(TileKey k)
 static Boolean UnpackVector(App *a, TileKey parent, const UInt8 *data, UInt32 size,
     const CacheMeta *meta)
 {
-    if (!a->vectorData) a->vectorData=MapAlloc(VECTOR_CAPACITY);
-    if (!a->vectorData) return false;
+    UInt32 bytes=VectorExpectedSize(data,size);
+    if (!bytes || bytes>VECTOR_MAX_DECODED ||
+        !MapReserve(&a->vectorData,&a->vectorCapacity,bytes)) return false;
     UInt32 args[]={nativeVectorUnpack,(UInt32)data,size,(UInt32)a->vectorData,
-        VECTOR_CAPACITY,(UInt32)a->scratch};
+        a->vectorCapacity,(UInt32)a->scratch};
 #ifdef MAP_VECTOR_BENCH
     UInt32 started=TimGetTicks();
 #endif
@@ -1154,7 +1155,7 @@ static void Layer(App *a, UInt8 layer)
     if (a->vectorData) {
         MemPtrFree(a->vectorData);
         a->vectorData=NULL;
-        a->vectorSize=0;
+        a->vectorSize=a->vectorCapacity=0;
     }
 #ifdef MAP_VECTOR_BENCH
     a->unpackTicks=a->unpacked=a->renderTicks=a->peakTicks=a->rendered=a->extractTicks=a->indexTicks=0;

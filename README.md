@@ -45,8 +45,9 @@ distinct roads and features. **Apply** saves your choices.
 **Defaults** restores the original selections in the form.
 
 Map opens on Streets and restores the saved viewport and marker. The tile cache is bounded
-to about 3 MiB and uses server expiry and validators. Map only requests tiles
-visible after a pan or zoom; it does not bulk download tiles for offline use.
+to about 3 MiB and uses server expiry and validators. Tile response buffers grow as
+needed up to 1 MiB. Shortbread tiles can expand to 2 MiB during decoding.
+Map only requests tiles visible after a pan or zoom.
 See the [standard tile policy](https://operations.osmfoundation.org/policies/tiles/).
 To retry after connecting, tap the footer or use **Map → Retry tiles**.
 

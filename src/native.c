@@ -119,7 +119,7 @@ Word VectorUnpack(const Byte *data, Word size, Byte *out, Word capacity, Byte *s
             (Word)(at[0] | ((Word)at[1] << 8))) return 0;
         at += 2;
     }
-    Word expected = le32(end + 4);
+    Word expected = VectorExpectedSize(data, size);
     if (!expected || expected > capacity) return 0;
     Arena arena = {scratch, SCRATCH_BYTES};
     z_stream z = {0};

@@ -8,6 +8,9 @@
 #define CACHE_LIMIT (3UL*1024*1024)
 #define RECORD_LIMIT 192
 #define MAGIC 0x4d617032UL
+#define LAST_BODY_PART ((MAP_BODY_MAX-1)/BODY_CHUNK)
+
+_Static_assert(LAST_BODY_PART<=255, "tile part number must fit in a byte");
 
 typedef struct {
     UInt32 magic, source, created, length;
@@ -136,7 +139,7 @@ static void Trim(TileCache *c, TileKey k, UInt16 kept)
     while (count>kept && (count>RECORD_LIMIT || total>CACHE_LIMIT)) {
         UInt16 first=count-1;
         DiskHeader tail, previous;
-        if (ReadHeader(DmQueryRecord(c->db,first),&tail) && tail.part<=4) {
+        if (ReadHeader(DmQueryRecord(c->db,first),&tail) && tail.part<=LAST_BODY_PART) {
             for (UInt8 part=tail.part;part && first>kept;--part) {
                 if (!ReadHeader(DmQueryRecord(c->db,first-1),&previous) ||
                     !Matches(&previous,HeaderKey(&tail)) || previous.part!=part-1 ||

@@ -98,6 +98,9 @@ static void vector_fixture(unsigned char *bits, unsigned char *scratch)
     assert(deflate(&z,Z_FINISH)==Z_STREAM_END);
     unsigned length=(unsigned)z.total_out;
     assert(deflateEnd(&z)==Z_OK);
+    assert(VectorExpectedSize(gzip,length)==sizeof(mvt));
+    assert(VectorExpectedSize(mvt,sizeof(mvt))==sizeof(mvt));
+    assert(!VectorExpectedSize(gzip,17));
     assert(VectorUnpack(gzip,length,decoded,sizeof(decoded),scratch)==sizeof(mvt));
     assert(!memcmp(mvt,decoded,sizeof(mvt)));
     assert(!VectorUnpack(gzip,length,decoded,sizeof(decoded)-1,scratch));

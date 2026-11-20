@@ -6,7 +6,7 @@
 #define CREATOR 'PMap'
 #define WORLD ((Int32)0x10000000)
 #define BODY_CHUNK 60000UL
-#define MAP_BODY_MAX (256UL * 1024)
+#define MAP_BODY_MAX (1024UL * 1024)
 
 typedef struct {
     UInt32 source;
