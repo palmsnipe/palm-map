@@ -421,12 +421,14 @@ Word __attribute__((section(".entry"))) MapNative(void *emu, Byte *args, void *c
             (Byte *)be32(args+20));
     if (command == nativeVectorLabels) {
         VectorReadLabels(data,size,(Byte *)be32(args+12),be32(args+16),
-            be32(args+20),be32(args+24),(VectorLabels *)be32(args+28),(const void *)be32(args+32));
+            be32(args+20),be32(args+24),(VectorLabels *)be32(args+28),(const void *)be32(args+32),
+            be32(args+36));
         return 1;
     }
-    if (command == nativeIndexScene) return VectorIndexScene(data,size,(void *)be32(args+12));
+    if (command == nativeIndexScene)
+        return VectorIndexScene(data,size,(void *)be32(args+12),(Byte *)be32(args+16));
     if (command == nativeIndexLabels)
-        return VectorIndexLabels(data,size,(Byte *)be32(args+12),(void *)be32(args+16));
+        return VectorIndexLabels(data,size,(Byte *)be32(args+12),(void *)be32(args+16),be32(args+20));
     if (command == nativeLabelBitmap) {
         MapLabelBitmap((const MapGlyph *)data,(const char *)size,(Byte *)be32(args+12),
             be32(args+16),be32(args+20),(int)be32(args+24),(int)be32(args+28),be32(args+32));

@@ -23,6 +23,7 @@
 #define VERSION 1
 #define HTTPS_PREF 1
 #define SHORTBREAD_PREF 2
+#define SHORTBREAD_PREF_VERSION 2
 #define OFFLINE_PREF 3
 #define SOURCE_MAX 150
 #define OSM "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
@@ -74,10 +75,10 @@ typedef struct {
     void *labelIndex, *sceneIndex;
     Boolean indexReady, indexTried, sceneReady, sceneTried, labelPainterTried;
     BitmapType *labelBase, *labelBitmap;
-    UInt8 *labelPixels, labelKey, labelHalo, labelStreet, labelLandmark;
+    UInt8 *labelPixels, labelKey, labelHalo, labelStreet, labelLandmark, labelWater;
     MapGlyph *glyphs;
 #ifdef MAP_VECTOR_BENCH
-    UInt32 unpackTicks, renderTicks, peakTicks, rendered;
+    UInt32 unpackTicks, unpacked, renderTicks, peakTicks, rendered;
     UInt32 indexTicks, extractTicks, overlayTicks;
     UInt16 labelCount;
 #endif
@@ -133,6 +134,15 @@ static Tile *Vacant(App *a)
     return t;
 }
 
+static UInt16 LabelOptions(const App *a, UInt8 z)
+{
+    UInt16 visible=(z>=VECTOR_CITY_MIN_Z ? vectorCityNames : 0) |
+        (z>=VECTOR_WATER_MIN_Z ? vectorWaterNames : 0) |
+        (z>=VECTOR_STREET_MIN_Z ? vectorStreetNames : 0) |
+        (z>=VECTOR_LANDMARK_MIN_Z ? vectorLandmarks : 0);
+    return a->vectorOptions & visible;
+}
+
 static Boolean Decode(App *a, TileKey k, const UInt8 *data, UInt32 n,
     UInt8 fallback, const CacheMeta *meta)
 {
@@ -173,7 +183,7 @@ static Boolean Decode(App *a, TileKey k, const UInt8 *data, UInt32 n,
 #endif
             if (!a->sceneIndex) a->sceneIndex=MapAlloc(VECTOR_SCENE_CAPACITY);
             if (a->sceneIndex) {
-                UInt32 scene[]={nativeIndexScene,(UInt32)data,n,(UInt32)a->sceneIndex};
+                UInt32 scene[]={nativeIndexScene,(UInt32)data,n,(UInt32)a->sceneIndex,(UInt32)a->scratch};
                 a->sceneReady=PceNativeCall(a->native,scene)!=0;
             }
 #ifdef MAP_VECTOR_BENCH
@@ -203,12 +213,15 @@ static Boolean Decode(App *a, TileKey k, const UInt8 *data, UInt32 n,
 #endif
     if (!PceNativeCall(a->native,args)) goto failed;
 #ifdef MAP_VECTOR_BENCH
-    UInt32 elapsed=TimGetTicks()-started;
-    a->renderTicks+=elapsed;
-    if (elapsed>a->peakTicks) a->peakTicks=elapsed;
-    ++a->rendered;
+    if (fallback==exactTile) {
+        UInt32 elapsed=TimGetTicks()-started;
+        a->renderTicks+=elapsed;
+        if (elapsed>a->peakTicks) a->peakTicks=elapsed;
+        ++a->rendered;
+    }
 #endif
-    if (vector && k.z>=VECTOR_LABEL_MIN_Z) {
+    UInt16 labelsShown=vector ? LabelOptions(a,k.z) : 0;
+    if (labelsShown) {
         next.labels=MemPtrNew(sizeof(*next.labels));
         if (next.labels) {
             if (args[8] && !a->indexTried) {
@@ -219,7 +232,7 @@ static Boolean Decode(App *a, TileKey k, const UInt8 *data, UInt32 n,
                 if (!a->labelIndex) a->labelIndex=MapAlloc(VECTOR_INDEX_CAPACITY);
                 if (a->labelIndex) {
                     UInt32 index[]={nativeIndexLabels,(UInt32)data,n,(UInt32)a->scratch,
-                        (UInt32)a->labelIndex};
+                        (UInt32)a->labelIndex,labelsShown};
                     a->indexReady=PceNativeCall(a->native,index)!=0;
                 }
 #ifdef MAP_VECTOR_BENCH
@@ -228,7 +241,7 @@ static Boolean Decode(App *a, TileKey k, const UInt8 *data, UInt32 n,
             }
             UInt32 labels[]={nativeVectorLabels,(UInt32)data,n,(UInt32)a->scratch,
                 args[8],args[9],args[10],(UInt32)next.labels,
-                a->indexReady ? (UInt32)a->labelIndex : 0};
+                a->indexReady ? (UInt32)a->labelIndex : 0,labelsShown};
 #ifdef MAP_VECTOR_BENCH
             started=TimGetTicks();
 #endif
@@ -286,7 +299,8 @@ static Boolean UnpackVector(App *a, TileKey parent, const UInt8 *data, UInt32 si
 #endif
     a->vectorSize=PceNativeCall(a->native,args);
 #ifdef MAP_VECTOR_BENCH
-    a->unpackTicks=TimGetTicks()-started;
+    a->unpackTicks+=TimGetTicks()-started;
+    ++a->unpacked;
 #endif
     a->indexReady=a->indexTried=a->sceneReady=a->sceneTried=false;
     a->vectorKey=parent;
@@ -462,9 +476,10 @@ static void PrepareLabelPainter(App *a)
     a->labelHalo=Color(255,253,241);
     a->labelStreet=Color(35,53,51);
     a->labelLandmark=Color(38,42,72);
+    a->labelWater=Color(25,69,105);
     a->labelKey=255;
     while (a->labelKey==a->labelHalo || a->labelKey==a->labelStreet ||
-        a->labelKey==a->labelLandmark) --a->labelKey;
+        a->labelKey==a->labelLandmark || a->labelKey==a->labelWater) --a->labelKey;
     BmpSetTransparentValue(a->labelBitmap,a->labelKey);
 }
 
@@ -631,16 +646,23 @@ static UInt16 DrawLabels(App *a, const Visible *v, Tile *const *tiles, UInt16 co
     UInt16 oldCoord=WinSetCoordinateSystem(a->highDensity ? kCoordinatesDouble : kCoordinatesStandard);
     UInt16 order[SLOTS];
     NearTiles(a,v,count,order);
-    for (UInt16 rank=5;rank>0;--rank) {
-        Boolean landmark=rank>=4;
-        if (!(a->vectorOptions & (landmark ? vectorLandmarks : vectorStreetNames))) continue;
+    UInt16 labelsShown=LabelOptions(a,a->view.z);
+    for (UInt16 rank=labelCapital;rank>=labelStreet;--rank) {
+        Boolean city=rank>=labelTown;
+        Boolean landmark=rank>=labelLandmark && !city;
+        Boolean water=rank==labelWater;
+        UInt16 option=city ? vectorCityNames : landmark ? vectorLandmarks :
+            water ? vectorWaterNames : vectorStreetNames;
+        if (!(labelsShown & option)) continue;
         for (UInt16 pos=0;pos<count && drawn<DRAWN_LABELS;++pos) {
             if (landmark && landmarkCount>=DRAWN_LANDMARKS) break;
             UInt16 t=order[pos];
             const VectorLabels *labels=tiles[t] ? tiles[t]->labels : NULL;
             if (!labels) continue;
-            const VectorLabel *items=landmark ? labels->landmarks : labels->streets;
-            UInt16 n=landmark ? labels->landmarkCount : labels->streetCount;
+            const VectorLabel *items=city ? labels->cities : landmark ? labels->landmarks :
+                water ? labels->waters : labels->streets;
+            UInt16 n=city ? labels->cityCount : landmark ? labels->landmarkCount :
+                water ? labels->waterCount : labels->streetCount;
             Coord originX=v[t].x*scale, originY=v[t].y*scale;
             for (UInt16 i=0;i<n && drawn<DRAWN_LABELS;++i) {
                 if (landmark && landmarkCount>=DRAWN_LANDMARKS) break;
@@ -664,7 +686,7 @@ static UInt16 DrawLabels(App *a, const Visible *v, Tile *const *tiles, UInt16 co
                     if (LabelOccupied(placed,used,&dot)) continue;
                 }
                 Int16 ux=256,uy=0;
-                if (!landmark && (a->vectorOptions & vectorAngledNames))
+                if (water || (option==vectorStreetNames && (a->vectorOptions & vectorAngledNames)))
                     LabelDirection(bx-ax,by-ay,&ux,&uy);
                 Coord advance=LabelAdvance(a,item->name);
                 Int16 sinAbs=uy<0 ? -uy : uy;
@@ -673,12 +695,13 @@ static UInt16 DrawLabels(App *a, const Visible *v, Tile *const *tiles, UInt16 co
                 if (w>MAP_LABEL_BITMAP_SIDE || h>MAP_LABEL_BITMAP_SIDE) continue;
                 RectangleType box;
                 Boolean fits=false;
+                Boolean placePoint=(city || water) && !item->span;
                 for (UInt16 pos=0;pos<5 && !fits;++pos) {
                     Coord x,y;
-                    if (landmark) {
-                        if (pos==4) break;
+                    if (landmark || placePoint) {
+                        if (pos==4 && landmark) break;
                         x=pos==0 ? ax+4 : pos==1 ? ax-w-4 : ax-w/2;
-                        y=pos<2 ? ay-h/2 : pos==2 ? ay-h-2 : ay+2;
+                        y=pos<2 || pos==4 ? ay-h/2 : pos==2 ? ay-h-2 : ay+2;
                     } else {
                         Int16 fraction=pos==0 ? 2 : pos==1 ? 1 : pos==2 ? 3 : pos==3 ? 0 : 4;
                         x=ax+(bx-ax)*fraction/4-w/2;
@@ -696,7 +719,8 @@ static UInt16 DrawLabels(App *a, const Visible *v, Tile *const *tiles, UInt16 co
                     Fill(dot.topLeft.x,dot.topLeft.y,dot.extent.x,dot.extent.y,halo);
                     Fill(ax-1,ay-1,3,3,ink);
                 }
-                PaintLabel(a,item->name,&box,ux,uy,landmark ? a->labelLandmark : a->labelStreet);
+                PaintLabel(a,item->name,&box,ux,uy,water ? a->labelWater :
+                    city || landmark ? a->labelLandmark : a->labelStreet);
             }
         }
     }
@@ -735,7 +759,8 @@ static void DrawDownloaded(App *a, Boolean force)
 static void DrawMap(App *a)
 {
     if (!a->map.extent.y) return;
-    if (a->view.layer==shortbread && (a->view.z>=VECTOR_LABEL_MIN_Z || a->view.pin))
+    Boolean mapLabels=a->view.layer==shortbread && LabelOptions(a,a->view.z);
+    if (a->view.layer==shortbread && (mapLabels || a->view.pin))
         PrepareLabelPainter(a);
     RectangleType clip;
     WinGetClip(&clip);
@@ -795,7 +820,7 @@ static void DrawMap(App *a)
     // Composite the labels after the complete terrain bitmap pass.
     Marker marker={0};
     Boolean hasMarker=LocateMarker(a,&marker);
-    if (a->labelBitmap && a->view.layer==shortbread && a->view.z>=VECTOR_LABEL_MIN_Z && drawn) {
+    if (a->labelBitmap && mapLabels && drawn) {
 #ifdef MAP_VECTOR_BENCH
         UInt32 started=TimGetTicks();
         a->labelCount=DrawLabels(a,v,tiles,count,hasMarker ? &marker : NULL);
@@ -818,8 +843,9 @@ static void DrawMap(App *a)
         WinSetTextColor(Color(0,0,0));
         Text(stats,4,TOP+2,a->width-8);
         if (vector) {
-            StrPrintF(stats,"inflate %lu index %lu ms",a->unpackTicks*1000/SysTicksPerSecond(),
-                a->indexTicks*1000/SysTicksPerSecond());
+            StrPrintF(stats,"inflate %lu x%lu idx %lu ms",
+                a->unpacked ? a->unpackTicks*1000/SysTicksPerSecond()/a->unpacked : 0,
+                a->unpacked,a->indexTicks*1000/SysTicksPerSecond());
             Text(stats,4,TOP+13,a->width-8);
             StrPrintF(stats,"labels %lu + %lu ms (%u)",
                 a->extractTicks*1000/SysTicksPerSecond()/a->rendered,
@@ -1097,7 +1123,7 @@ static void Zoom(App *a, Int16 amount)
     if (z<0 || z>MaxZoom(a)) return;
     a->view.z=(UInt8)z;
 #ifdef MAP_VECTOR_BENCH
-    a->unpackTicks=a->renderTicks=a->peakTicks=a->rendered=a->extractTicks=a->indexTicks=0;
+    a->unpackTicks=a->unpacked=a->renderTicks=a->peakTicks=a->rendered=a->extractTicks=a->indexTicks=0;
 #endif
     ViewportChanged(a);
     DrawMap(a);
@@ -1131,7 +1157,7 @@ static void Layer(App *a, UInt8 layer)
         a->vectorSize=0;
     }
 #ifdef MAP_VECTOR_BENCH
-    a->unpackTicks=a->renderTicks=a->peakTicks=a->rendered=a->extractTicks=a->indexTicks=0;
+    a->unpackTicks=a->unpacked=a->renderTicks=a->peakTicks=a->rendered=a->extractTicks=a->indexTicks=0;
 #endif
     a->view.layer=layer;
     if (a->view.z>MaxZoom(a)) a->view.z=MaxZoom(a);
@@ -1170,9 +1196,12 @@ static void Layout(App *a, FormType *f, UInt16 id)
         Bounds(f,CancelButton,w-56,139,50,15);
     } else if (id==ShortbreadForm) {
         Coord right=w/2;
-        Bounds(f,ShowBuildings,right,34,w-right-4,13);
-        Bounds(f,ShowLand,right,49,w-right-4,13);
-        Bounds(f,ShowLandmarkNames,right,80,w-right-4,13);
+        Bounds(f,ShowBuildings,right,33,w-right-4,13);
+        Bounds(f,ShowLand,right,46,w-right-4,13);
+        Bounds(f,ShowNationalBorders,right,72,w-right-4,13);
+        Bounds(f,ShowLandmarkNames,right,98,w-right-4,13);
+        Bounds(f,ShowWaterNames,right,111,w-right-4,13);
+        Bounds(f,HighContrast,right,124,w-right-4,13);
         Bounds(f,ApplyShortbread,6,h-21,42,15);
         Bounds(f,ResetShortbread,(w-50)/2,h-21,50,15);
         Bounds(f,CancelShortbread,w-48,h-21,42,15);
@@ -1548,7 +1577,9 @@ static const struct {
 } shortbreadChoices[]={
     {ShowRoads,vectorRoads}, {ShowBuildings,vectorBuildings},
     {ShowWater,vectorWater}, {ShowLand,vectorLand},
+    {ShowProvincialBorders,vectorProvincialBorders}, {ShowNationalBorders,vectorNationalBorders},
     {ShowStreetNames,vectorStreetNames}, {ShowLandmarkNames,vectorLandmarks},
+    {ShowCityNames,vectorCityNames}, {ShowWaterNames,vectorWaterNames},
     {AngleStreetNames,vectorAngledNames}, {HighContrast,vectorHighContrast}
 };
 
@@ -1567,8 +1598,9 @@ static void SaveShortbreadOptions(App *a, FormType *f)
     UInt16 changed=a->vectorOptions^options;
     if (!changed) return;
     a->vectorOptions=options;
-    PrefSetAppPreferences(CREATOR,SHORTBREAD_PREF,VERSION,&options,sizeof(options),true);
-    if (changed & VECTOR_TILE_OPTIONS)
+    PrefSetAppPreferences(CREATOR,SHORTBREAD_PREF,SHORTBREAD_PREF_VERSION,&options,sizeof(options),true);
+    if (changed & VECTOR_LABEL_OPTIONS) a->indexReady=a->indexTried=false;
+    if (changed & (VECTOR_TILE_OPTIONS | VECTOR_LABEL_OPTIONS))
         for (UInt16 i=0;i<SLOTS;++i)
             if (a->tiles[i].layer==shortbread) Destroy(a->tiles+i);
 }
@@ -1681,9 +1713,12 @@ static void LoadPrefs(App *a)
         offlineSize!=sizeof(a->offline) || a->offline>true)
         a->offline=false;
     UInt16 optionsSize=sizeof(a->vectorOptions);
-    if (PrefGetAppPreferences(CREATOR,SHORTBREAD_PREF,&a->vectorOptions,&optionsSize,true)!=VERSION ||
-        optionsSize!=sizeof(a->vectorOptions) || (a->vectorOptions & ~VECTOR_OPTION_MASK))
+    Int16 optionsVersion=PrefGetAppPreferences(CREATOR,SHORTBREAD_PREF,&a->vectorOptions,&optionsSize,true);
+    if (optionsSize!=sizeof(a->vectorOptions) || (a->vectorOptions & ~VECTOR_OPTION_MASK) ||
+        (optionsVersion!=VERSION && optionsVersion!=SHORTBREAD_PREF_VERSION))
         a->vectorOptions=VECTOR_DEFAULT;
+    else if (optionsVersion==VERSION)
+        a->vectorOptions|=VECTOR_NEW_OPTIONS;
     a->sourceId=SourceID(a);
 }
 

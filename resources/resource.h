@@ -39,6 +39,10 @@
 #define ApplyShortbread 1039
 #define ResetShortbread 1040
 #define CancelShortbread 1041
+#define ShowProvincialBorders 1044
+#define ShowNationalBorders 1045
+#define ShowCityNames 1046
+#define ShowWaterNames 1047
 #define MenuLayerCycle 1115
 #define MenuShortbreadSettings 1116
 #define MenuOffline 1105

@@ -26,8 +26,9 @@ Open the **Layers** menu and tap a layer to switch.
   `https://maps.example.org/{z}/{x}/{y}.png`, non-interlaced 256 × 256 PNG tiles,
   and a domain certificate trusted by the bundled GlobalSign/ISRG roots.
 - **Shortbread**: live OpenStreetMap vector tiles with a compact style for
-  land, water, streets and building footprints. Street names appear from
-  zoom 10 where supplied. Named landmarks such as towers, museums, and
+  land, water, borders, streets and building footprints. City names appear
+  from zoom 4, water names from zoom 5, and street names from zoom 10 where
+  supplied. Named landmarks such as towers, museums, and
   historic sites appear from zoom 14. Labels use Palm font glyphs at native
   pixel size. Street names follow their road segment, and landmark names
   stay horizontal. Labels avoid other labels, the search pin, and the zoom
@@ -37,9 +38,10 @@ Open the **Layers** menu and tap a layer to switch.
   and the [OSM vector tile policy](https://operations.osmfoundation.org/policies/vector/).
 
 Open **Layers → Shortbread settings** to show or hide roads, buildings,
-water, land cover, street names, and landmark names. Turn off angled
-street names to draw road labels horizontally, or enable high contrast
-for more distinct roads and features. **Apply** saves your choices.
+water, land cover, city and water names, street names, and landmarks.
+Provincial and national borders have separate switches. Turn off **Angle
+streets** to draw road labels horizontally, or enable high contrast for more
+distinct roads and features. **Apply** saves your choices.
 **Defaults** restores the original selections in the form.
 
 Map opens on Streets and restores the saved viewport and marker. The tile cache is bounded
@@ -189,3 +191,12 @@ geometry pass at Parliament Hill averaged 10 ms per tile at zoom 19
 with the source tile and its path index already in memory. The download
 counter increased on live requests and held steady when revisiting cached
 tiles and overzooming the same vector source.
+
+Map 0.2.5 was benchmarked at Parliament Hill on the emulated Tungsten E2
+at 100 MIPS with all four geography options on. Processing four display
+tiles took about 1,040 ms at zoom 14 and 40 ms at zoom 19 with the decoded
+source and indexes in RAM. At zoom 19, decompressing and indexing the
+cached source added about 150 ms. The timings include geometry, label
+extraction, and the final viewport label pass. Network wait and terrain
+bitmap blitting are outside these timings. The overlays use the same tile
+payload as the rest of Shortbread.

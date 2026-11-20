@@ -8,12 +8,15 @@ SECTIONS
 {
     .vec : { KEEP(*(.vectors)) *(.vectors) } > main
     .text : {
-        *(.text .text.* .rodata .rodata.* .data.rel.ro .data.rel.ro.*)
+        /* Keep shared runtime functions within 16-bit PC-relative call range. */
+        *main.o(.text .text.* .rodata .rodata.* .data.rel.ro .data.rel.ro.*)
         *libgcc.a:*(.text .text.* .rodata .rodata.*)
+        *libc.a:*(.text .text.* .rodata .rodata.*)
+        *(.text .text.* .rodata .rodata.* .data.rel.ro .data.rel.ro.*)
         . = ALIGN(4);
-        __reloc_offsets_start = ABSOLUTE(.);
+        __reloc_offsets_start = ABSOLUTE(. - ORIGIN(main));
         KEEP(*(.reloc_offsets))
-        __reloc_offsets_end = ABSOLUTE(.);
+        __reloc_offsets_end = ABSOLUTE(. - ORIGIN(main));
         . = ALIGN(4);
     } > main
     .trash : { *(.init) *(.init.*) *(.fini) *(.fini.*) *(*.macsbug) } > trash

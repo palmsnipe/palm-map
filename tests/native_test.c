@@ -123,7 +123,7 @@ static void vector_fixture(unsigned char *bits, unsigned char *scratch)
     assert(pixel(bits,0,0)!=building && pixel(bits,0,0)!=pixel(bits,80,80));
     void *scene=malloc(VECTOR_SCENE_CAPACITY);
     unsigned char *direct=malloc(256*512);
-    assert(scene && direct && VectorIndexScene(decoded,sizeof(decoded),scene));
+    assert(scene && direct && VectorIndexScene(decoded,sizeof(decoded),scene,scratch));
     for (unsigned y=0;y<4;++y) {
         for (unsigned x=0;x<4;++x) {
             assert(VectorDraw(decoded,sizeof(decoded),bands,scratch,2,x,y,VECTOR_DEFAULT,NULL));
@@ -163,27 +163,81 @@ static void label_fixture(unsigned char *scratch)
         0x22,0x09,0x0a,0x07,0xc3,0x89,'g','l','i','s','e',0x28,0x80,0x20,0x78,0x02
     };
     VectorLabels labels;
-    VectorReadLabels(tile,sizeof(tile),scratch,0,0,0,&labels,NULL);
+    VectorReadLabels(tile,sizeof(tile),scratch,0,0,0,&labels,NULL,VECTOR_DEFAULT);
     assert(labels.streetCount==1 && labels.landmarkCount==2);
     assert(!strcmp(labels.streets[0].name,"Wellington Street") &&
         labels.streets[0].priority==2 && labels.streets[0].span==255);
     assert(!strcmp(labels.landmarks[0].name,"Peace Tower"));
     assert(!strcmp(labels.landmarks[1].name,"\xc9glise"));
-    VectorReadLabels(tile,sizeof(tile),scratch,2,2,1,&labels,NULL);
+    VectorReadLabels(tile,sizeof(tile),scratch,2,2,1,&labels,NULL,VECTOR_DEFAULT);
     assert(labels.streetCount==1 && labels.streets[0].y==0);
     assert(labels.landmarkCount==1 && labels.landmarks[0].x==63 && labels.landmarks[0].y==6);
     void *index=malloc(VECTOR_INDEX_CAPACITY);
-    assert(index && VectorIndexLabels(tile,sizeof(tile),scratch,index));
+    assert(index && VectorIndexLabels(tile,sizeof(tile),scratch,index,VECTOR_DEFAULT));
     VectorLabels indexed;
-    VectorReadLabels(tile,sizeof(tile),scratch,2,2,1,&indexed,index);
+    VectorReadLabels(tile,sizeof(tile),scratch,2,2,1,&indexed,index,VECTOR_DEFAULT);
     assert(indexed.streetCount==labels.streetCount && indexed.landmarkCount==labels.landmarkCount);
     assert(!memcmp(indexed.streets,labels.streets,sizeof(VectorLabel)));
     assert(!memcmp(indexed.landmarks,labels.landmarks,sizeof(VectorLabel)));
-    VectorReadLabels(tile,sizeof(tile),scratch,2,2,2,&labels,index);
+    VectorReadLabels(tile,sizeof(tile),scratch,2,2,2,&labels,index,VECTOR_DEFAULT);
     assert(!labels.streetCount && !labels.landmarkCount);
     free(index);
-    VectorReadLabels(tile,3,scratch,0,0,0,&labels,NULL);
+    VectorReadLabels(tile,3,scratch,0,0,0,&labels,NULL,VECTOR_DEFAULT);
     assert(!labels.streetCount && !labels.landmarkCount);
+}
+
+static void geography_fixture(unsigned char *bits, unsigned char *scratch)
+{
+    // National, provincial and local lines followed by a capital, a lake and a river.
+    static const unsigned char tile[] =
+        "\032\140\012\012" "boundaries"
+        "\022\020\022\002\000\000\030\002\042\010\011\000\200\004\012\200\100\000"
+        "\022\020\022\002\000\001\030\002\042\010\011\000\200\010\012\200\100\000"
+        "\022\020\022\002\000\002\030\002\042\010\011\000\200\014\012\200\100\000"
+        "\032\013" "admin_level" "\042\002\040\002\042\002\050\004\042\002\060\014\050\200\040\170\002"
+        "\032\105\012\014" "place_labels"
+        "\022\017\022\004\000\000\001\001\030\001\042\005\011\200\010\200\012"
+        "\032\004" "name" "\032\004" "kind" "\042\010\012\006" "Ottawa"
+        "\042\011\012\007" "capital" "\050\200\040\170\002"
+        "\032\077\012\025" "water_polygons_labels"
+        "\022\015\022\002\000\000\030\001\042\005\011\200\014\200\014"
+        "\032\004" "name" "\042\014\012\012" "Dow's Lake" "\050\200\040\170\002"
+        "\032\165\012\022" "water_lines_labels"
+        "\022\022\022\004\000\000\001\001\030\002\042\010\011\000\210\016\012\200\100\000"
+        "\032\004" "name" "\032\007" "name_en"
+        "\042\047\012\045" "Ottawa River / Rivi\303\250re des Outaouais"
+        "\042\016\012\014" "Ottawa River" "\050\200\040\170\002";
+    const unsigned size=sizeof(tile)-1;
+    unsigned char *bands[]={bits,bits+64*512,bits+128*512,bits+192*512};
+    void *scene=malloc(VECTOR_SCENE_CAPACITY);
+    void *index=malloc(VECTOR_INDEX_CAPACITY);
+    assert(scene && index && VectorIndexScene(tile,size,scene,scratch));
+    for (unsigned shift=0;shift<=2;shift+=2) {
+        for (unsigned indexed=0;indexed<=1;++indexed) {
+            const void *geometry=indexed ? scene : NULL;
+            unsigned y=16<<shift;
+            assert(VectorDraw(tile,size,bands,scratch,shift,0,0,vectorNationalBorders,geometry));
+            unsigned paper=pixel(bits,20,0), national=pixel(bits,20,y);
+            assert(national!=paper && pixel(bits,20,y+1)==national && pixel(bits,20,y*2)==paper);
+            assert(VectorDraw(tile,size,bands,scratch,shift,0,0,vectorProvincialBorders,geometry));
+            unsigned province=pixel(bits,20,y*2);
+            assert(province!=paper && province!=national && pixel(bits,20,y)==paper);
+            assert(pixel(bits,20,y*3)==paper);
+        }
+    }
+    VectorLabels labels;
+    VectorReadLabels(tile,size,scratch,0,0,0,&labels,NULL,VECTOR_DEFAULT);
+    assert(labels.cityCount==1 && labels.cities[0].priority==labelCapital);
+    assert(!strcmp(labels.cities[0].name,"Ottawa"));
+    assert(labels.waterCount==2 && !strcmp(labels.waters[0].name,"Dow's Lake"));
+    assert(!strcmp(labels.waters[1].name,"Ottawa River") && labels.waters[1].span==255);
+    assert(VectorIndexLabels(tile,size,scratch,index,vectorWaterNames));
+    VectorReadLabels(tile,size,scratch,2,0,0,&labels,index,vectorWaterNames);
+    assert(!labels.cityCount && labels.waterCount==2 && labels.waters[0].x==192);
+    VectorReadLabels(tile,size,scratch,0,0,0,&labels,NULL,vectorCityNames);
+    assert(labels.cityCount==1 && !labels.waterCount);
+    free(index);
+    free(scene);
 }
 
 static void text_fixture(void)
@@ -238,6 +292,7 @@ int main(int argc,char **argv)
     assert(bits && scratch);
     fixture(bits,scratch);
     vector_fixture(bits,scratch);
+    geography_fixture(bits,scratch);
     label_fixture(scratch);
     text_fixture();
     FILE *f=fopen(argv[1],"rb");
