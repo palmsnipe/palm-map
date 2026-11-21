@@ -42,6 +42,7 @@ jobs:
 
       - name: Fetch PalmTLS and package Map
         run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           tools/fetch-palmtls.sh
           if [ "$GITHUB_REF_TYPE" = tag ]; then
             python3 tools/package-release.py --tag "$GITHUB_REF_NAME"
