@@ -1,0 +1,100 @@
+name: Build Map
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: read
+    container:
+      image: ghcr.io/palmsnipe/palm-toolchain-sdk@sha256:2c441bfa432785cf90e34fb5f4efe241c07a9e3666ee475119d856f96db3299f
+      credentials:
+        username: palmsnipe
+        password: ${{ secrets.PALM_TOOLCHAIN_REGISTRY_TOKEN || github.token }}
+
+    steps:
+      - name: Check out Map
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install application build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends python3 zlib1g-dev
+
+      - name: Verify toolchain
+        run: make -C "$PALM_TOOLCHAIN_ROOT" check
+
+      - name: Build and test Map
+        run: make -j2 test
+
+      - name: Fetch PalmTLS and package Map
+        run: |
+          tools/fetch-palmtls.sh
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            python3 tools/package-release.py --tag "$GITHUB_REF_NAME"
+            test -s "docs/releases/${GITHUB_REF_NAME#v}.md"
+          else
+            python3 tools/package-release.py
+          fi
+
+      - name: Upload verified release files
+        uses: actions/upload-artifact@v7
+        with:
+          name: map-${{ github.sha }}
+          path: build/release/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out tagged release notes
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Download verified build
+        uses: actions/download-artifact@v7
+        with:
+          name: map-${{ github.sha }}
+          path: release-assets
+
+      - name: Verify release checksums
+        working-directory: release-assets
+        run: sha256sum --check SHA256SUMS
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" \
+            release-assets/Map.prc \
+            release-assets/PalmTLSArm-Modern.prc \
+            "release-assets/Map-$version.zip" \
+            "release-assets/Map-$version-source.tar.gz" \
+            release-assets/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --draft \
+            --title "Map $version" \
+            --notes-file "docs/releases/$version.md"

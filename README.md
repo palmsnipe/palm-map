@@ -118,6 +118,22 @@ Map's source and original launcher artwork are GPL-3.0-or-later. Release
 downloads include a corresponding source archive for Map and the PalmTLS
 library. See [THIRD_PARTY.md](THIRD_PARTY.md) for data and dependency attribution.
 
+## GitHub releases
+
+The [Build Map workflow](.github/workflows/build-release.yml) builds and tests
+Map on pushes to `main` and on manual runs. Pushing a tag such as `v0.2.8`
+also creates a draft GitHub release. Match the tag to the version in
+`resources/app.rcp` and add release notes under `docs/releases/` before tagging.
+
+The build uses the private Palm Toolchain SDK container. Grant the repository
+**Read** under the container package's **Manage Actions access**, or configure
+a read-only registry credential as `PALM_TOOLCHAIN_REGISTRY_TOKEN`.
+
+To create the same download set locally, run `make test`,
+`tools/fetch-palmtls.sh`, and `python3 tools/package-release.py` from a clean
+commit. The PRCs, install ZIP, source archive, and checksums appear in
+`build/release/`.
+
 ## Verification
 
 `make test` passed. In CloudpilotEmu, Map was installed and exercised on a
