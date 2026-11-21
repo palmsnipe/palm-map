@@ -40,24 +40,11 @@ void MapNetClose(MapNet *n)
     if (n->body) MemPtrFree(n->body);
 }
 
-// The Browser-only profile advertises TLS 1.2 as a negotiated version, but
-// only the standalone engine can service the fixed TLS 1.2 selector.
-static Boolean HasStandaloneTls12(void)
-{
-    LocalID id=DmFindDatabase(0,PALM_TLS_LIB_NAME);
-    DmOpenRef db=id ? DmOpenDatabase(0,id,dmModeReadOnly) : NULL;
-    if (!db) return false;
-    Boolean found=DmFindResource(db,'TlsC',1,NULL)!=dmMaxRecordIndex &&
-        DmFindResource(db,'TlsR',1,NULL)!=dmMaxRecordIndex;
-    DmCloseDatabase(db);
-    return found;
-}
-
 static Boolean StartLibraries(MapNet *n, Boolean forceTls12)
 {
     Err e;
     UInt32 caps;
-    const Char *missing=forceTls12 ? "Install PalmTLS TLS 1.2" : "Install PalmTLS HTTPS";
+    const Char *missing="Install PalmTLS ARM Modern";
     if (!n->tlsOpen) {
         e=SysLibFind(PALM_TLS_LIB_NAME,&n->tls);
         if (e && !n->tlsLoaded) {
@@ -70,20 +57,11 @@ static Boolean StartLibraries(MapNet *n, Boolean forceTls12)
         n->tlsOpen=true;
     }
     UInt32 needed=PALM_TLS_CAP_NATIVE_ARM|PALM_TLS_CAP_COOPERATIVE_IO|PALM_TLS_CAP_CA_STORE|
-        (forceTls12 ? PALM_TLS_CAP_TLS_1_2 : PALM_TLS_CAP_MODERN);
-    if (PalmTlsLibGetCapabilities(n->tls,&caps)!=errNone || (caps & needed)!=needed ||
-        (forceTls12 && !HasStandaloneTls12())) {
+        (forceTls12 ? PALM_TLS_CAP_TLS_1_2 : PALM_TLS_CAP_TLS_1_3);
+    if (PalmTlsLibGetCapabilities(n->tls,&caps)!=errNone || (caps & needed)!=needed) {
         Failed(n,missing,0); return false;
     }
-    n->protocol=forceTls12 ? palmTlsProtocolTls12 : palmTlsProtocolModern;
-    n->options=PALM_TLS_SESSION_ALLOW_RESUME;
-    if (!forceTls12 && !(caps & PALM_TLS_CAP_HOST_RANDOM)) {
-        if (caps & PALM_TLS_CAP_BROWSER_STYLUS_RANDOM)
-            n->options=PALM_TLS_SESSION_REQUIRE_STYLUS_RANDOM;
-        else {
-            Failed(n,"PalmTLS needs entropy",0); return false;
-        }
-    }
+    n->protocol=forceTls12 ? palmTlsProtocolTls12 : palmTlsProtocolTls13;
     if (!n->roots) n->roots=DmGetResource('cert',1000);
     if (n->roots && !n->trust) {
         n->trust=MemHandleLock(n->roots);
@@ -144,7 +122,7 @@ Boolean MapNetStart(MapNet *n, const Char *url, const CacheMeta *cached, Boolean
     }
     if (!StartLibraries(n,forceTls12)) return false;
     n->requestLength=HttpBuildGetRequestEx(&n->url,0,NULL,false,
-        "PalmMap/0.2.6 (+https://github.com/palmsnipe)",vector,
+        "PalmMap/0.2.8 (+https://github.com/palmsnipe)",vector,
         n->request,sizeof(n->request));
     if (!n->requestLength) { Failed(n,"Tile URL is too long",0); return false; }
     n->conditional=false;
@@ -187,7 +165,7 @@ static UInt16 OpenSession(MapNet *n)
     p.trustedPeerP=n->trust;
     p.trustedPeerLength=n->trustSize;
     p.timeoutTicks=1;
-    p.options=n->options|PALM_TLS_SESSION_COOPERATIVE;
+    p.options=PALM_TLS_SESSION_ALLOW_RESUME|PALM_TLS_SESSION_COOPERATIVE;
     r.structSize=sizeof(r);
     Err e=PalmTlsLibSessionOpen(n->tls,&p,&r);
     n->session=r.sessionId;

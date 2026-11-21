@@ -17,7 +17,7 @@ typedef struct {
 typedef struct {
     Boolean tlsOpen, tlsLoaded, netOpen, netLoaded, conditional, vector;
     UInt16 tls, net, phase, code, protocol;
-    UInt32 options, session, deadline, length, downloaded, bodyCapacity;
+    UInt32 session, deadline, length, downloaded, bodyCapacity;
     UInt16 requestLength, written;
     NetSocketRef socket;
     NetSocketAddrINType address;

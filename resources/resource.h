@@ -10,6 +10,7 @@
 #define UseButton 1014
 #define BackButton 1015
 #define SourceField 1021
+#define SourceCreditField 1027
 #define SaveButton 1022
 #define CancelButton 1023
 #define MenuRetry 1100

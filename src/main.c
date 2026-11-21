@@ -22,10 +22,13 @@
 #define RESULTS 8
 #define VERSION 1
 #define HTTPS_PREF 1
+#define HTTPS_PREF_VERSION 2
 #define SHORTBREAD_PREF 2
 #define SHORTBREAD_PREF_VERSION 2
 #define OFFLINE_PREF 3
+#define SOURCE_CREDIT_PREF 4
 #define SOURCE_MAX 150
+#define SOURCE_CREDIT_MAX 40
 #define OSM "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
 
 #define SHORTBREAD "https://vector.openstreetmap.org/shortbread_v1/{z}/{x}/{y}.mvt"
@@ -63,6 +66,7 @@ typedef struct {
 
 typedef struct {
     Pref view;
+    Char sourceCredit[SOURCE_CREDIT_MAX+1];
     UInt16 vectorOptions;
     UInt32 sourceId, useCount, retryAt, settleAt, lastCounter, counterAt, dragFrame;
     MapNet net;
@@ -132,6 +136,30 @@ static Tile *Vacant(App *a)
         if (a->tiles[i].used<t->used) t=&a->tiles[i];
     }
     return t;
+}
+
+static UInt16 VisibleTiles(App *a, Visible *v);
+
+static void DropOffscreenTiles(App *a)
+{
+    Visible visible[SLOTS];
+    UInt16 count=VisibleTiles(a,visible);
+    for (UInt16 i=0;i<SLOTS;++i) {
+        Tile *t=a->tiles+i;
+        if (!t->base[0]) continue;
+        UInt16 j=0;
+        if (t->layer==a->view.layer)
+            while (j<count && !SameTile(t->key,visible[j].key)) ++j;
+        if (t->layer!=a->view.layer || j==count) Destroy(t);
+    }
+}
+
+static void FreeVectorIndexes(App *a)
+{
+    if (a->labelIndex) MemPtrFree(a->labelIndex);
+    if (a->sceneIndex) MemPtrFree(a->sceneIndex);
+    a->labelIndex=a->sceneIndex=NULL;
+    a->indexReady=a->indexTried=a->sceneReady=a->sceneTried=false;
 }
 
 static UInt16 LabelOptions(const App *a, UInt8 z)
@@ -291,8 +319,14 @@ static Boolean UnpackVector(App *a, TileKey parent, const UInt8 *data, UInt32 si
     const CacheMeta *meta)
 {
     UInt32 bytes=VectorExpectedSize(data,size);
-    if (!bytes || bytes>VECTOR_MAX_DECODED ||
-        !MapReserve(&a->vectorData,&a->vectorCapacity,bytes)) return false;
+    if (!bytes || bytes>VECTOR_MAX_DECODED) return false;
+    if (!MapReserve(&a->vectorData,&a->vectorCapacity,bytes)) {
+        // The decoded source must fit in one chunk. Reclaim heap space and
+        // retry the same payload while keeping the current viewport intact.
+        FreeVectorIndexes(a);
+        DropOffscreenTiles(a);
+        if (!MapReserve(&a->vectorData,&a->vectorCapacity,bytes)) return false;
+    }
     UInt32 args[]={nativeVectorUnpack,(UInt32)data,size,(UInt32)a->vectorData,
         a->vectorCapacity,(UInt32)a->scratch};
 #ifdef MAP_VECTOR_BENCH
@@ -874,9 +908,10 @@ static void DrawMap(App *a)
         credit="Made with Natural Earth";
     else if (offline)
         credit="\251 OpenStreetMap / Natural Earth";
+    else if (a->view.layer==custom && StrCompare(a->view.source,OSM))
+        credit=a->sourceCredit[0] ? a->sourceCredit : "Custom tiles";
     else
-        credit=a->view.layer==custom ? "Custom tiles / OSM contributors" :
-            "\251 OpenStreetMap contributors";
+        credit="\251 OpenStreetMap contributors";
     Text(credit,4,textY,zoomX-8);
     WinPopDrawState();
     FormType *form=FrmGetActiveForm();
@@ -889,14 +924,14 @@ static void DrawMap(App *a)
 static UInt32 SourceID(const App *a)
 {
     const Pref *p=&a->view;
-    // Keep tiles fetched with the compatibility engine out of the normal OSM cache.
-    UInt32 compatibility=0x80000000UL;
+    // Keep the existing default raster cache across the TLS upgrade.
+    UInt32 rasterSource=0x80000000UL;
     if (p->layer==shortbread) return VECTOR_SOURCE;
     if (p->layer==cycle) return CYCLE_SOURCE;
-    if (p->layer!=custom) return a->forceTls12 ? compatibility : 0;
-    UInt32 hash=a->forceTls12 ? 2166136261UL^compatibility : 2166136261UL;
+    if (p->layer!=custom) return rasterSource;
+    UInt32 hash=2166136261UL^rasterSource;
     for (const UInt8 *s=(const UInt8 *)p->source;*s;++s) hash=(hash^*s)*16777619UL;
-    return hash && hash!=compatibility && hash!=VECTOR_SOURCE && hash!=CYCLE_SOURCE ? hash : 1;
+    return hash && hash!=rasterSource && hash!=VECTOR_SOURCE && hash!=CYCLE_SOURCE ? hash : 1;
 }
 
 static Boolean TileURL(const Char *source, TileKey k, Char *out, UInt16 cap)
@@ -1143,15 +1178,7 @@ static void Layer(App *a, UInt8 layer)
     if (a->view.layer==layer) return;
     FreeLabelPainter(a);
     a->labelPainterTried=false;
-    if (a->labelIndex) {
-        MemPtrFree(a->labelIndex);
-        a->labelIndex=NULL;
-    }
-    if (a->sceneIndex) {
-        MemPtrFree(a->sceneIndex);
-        a->sceneIndex=NULL;
-    }
-    a->indexReady=a->indexTried=a->sceneReady=a->sceneTried=false;
+    FreeVectorIndexes(a);
     if (a->vectorData) {
         MemPtrFree(a->vectorData);
         a->vectorData=NULL;
@@ -1193,7 +1220,8 @@ static void Layout(App *a, FormType *f, UInt16 id)
         Bounds(f,ResultsList,5,57,w-10,77);
         Bounds(f,BackButton,w-49,140,44,14);
     } else if (id==SourceForm) {
-        Bounds(f,SourceField,6,54,w-12,51);
+        Bounds(f,SourceField,6,54,w-12,40);
+        Bounds(f,SourceCreditField,6,115,w-12,14);
         Bounds(f,CancelButton,w-56,139,50,15);
     } else if (id==ShortbreadForm) {
         Coord right=w/2;
@@ -1501,13 +1529,12 @@ static Boolean MainEvent(App *a,FormType *f,EventType *e)
             return true;
         }
         if (e->data.menu.itemID==MenuHttps) {
-            UInt16 choice=FrmCustomAlert(HttpsAlert,a->forceTls12 ? "TLS 1.2" : "Modern",NULL,NULL);
+            UInt16 choice=FrmCustomAlert(HttpsAlert,a->forceTls12 ? "TLS 1.2" : "TLS 1.3",NULL,NULL);
             if (choice<2) {
                 Boolean force=choice==1;
                 if (a->forceTls12!=force) {
                     a->forceTls12=force;
-                    PrefSetAppPreferences(CREATOR,HTTPS_PREF,VERSION,&force,sizeof(force),true);
-                    a->sourceId=SourceID(a);
+                    PrefSetAppPreferences(CREATOR,HTTPS_PREF,HTTPS_PREF_VERSION,&force,sizeof(force),true);
                 }
                 Retry(a);
                 DrawMap(a);
@@ -1625,6 +1652,7 @@ static Boolean FormEvent(EventType *e)
             CtlSetEnabled(Object(f,UseButton),false);
         } else if (id==SourceForm) {
             SetField(Object(f,SourceField),a->view.source);
+            SetField(Object(f,SourceCreditField),a->sourceCredit);
         } else if (id==ShortbreadForm) {
             SetShortbreadOptions(f,a->vectorOptions);
         }
@@ -1662,6 +1690,10 @@ static Boolean FormEvent(EventType *e)
             }
             StrNCopy(a->view.source,s ? s : "",SOURCE_MAX);
             a->view.source[SOURCE_MAX]=0;
+            const Char *credit=FldGetTextPtr(Object(f,SourceCreditField));
+            StrNCopy(a->sourceCredit,a->view.source[0] && credit ? credit : "",SOURCE_CREDIT_MAX);
+            a->sourceCredit[SOURCE_CREDIT_MAX]=0;
+            PrefSetAppPreferences(CREATOR,SOURCE_CREDIT_PREF,VERSION,&a->sourceCredit,sizeof(a->sourceCredit),true);
             if (a->view.layer!=custom && a->view.source[0]) Layer(a,custom);
             else if (a->view.layer==custom && !a->view.source[0]) Layer(a,streets);
             a->sourceId=SourceID(a);
@@ -1704,11 +1736,15 @@ static void LoadPrefs(App *a)
     a->view.name[sizeof(a->view.name)-1]=0;
     if (a->view.markX>=WORLD || a->view.markY>=WORLD) a->view.pin=false;
     a->view.source[SOURCE_MAX]=0;
+    UInt16 creditSize=sizeof(a->sourceCredit);
+    if (PrefGetAppPreferences(CREATOR,SOURCE_CREDIT_PREF,a->sourceCredit,&creditSize,true)!=VERSION ||
+        creditSize!=sizeof(a->sourceCredit)) a->sourceCredit[0]=0;
+    a->sourceCredit[SOURCE_CREDIT_MAX]=0;
     a->view.layer=streets;
     UInt16 modeSize=sizeof(a->forceTls12);
-    if (PrefGetAppPreferences(CREATOR,HTTPS_PREF,&a->forceTls12,&modeSize,true)!=VERSION ||
+    if (PrefGetAppPreferences(CREATOR,HTTPS_PREF,&a->forceTls12,&modeSize,true)!=HTTPS_PREF_VERSION ||
         modeSize!=sizeof(a->forceTls12) || a->forceTls12>true)
-        a->forceTls12=true;
+        a->forceTls12=false;
     UInt16 offlineSize=sizeof(a->offline);
     if (PrefGetAppPreferences(CREATOR,OFFLINE_PREF,&a->offline,&offlineSize,true)!=VERSION ||
         offlineSize!=sizeof(a->offline) || a->offline>true)
