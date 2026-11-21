@@ -5,8 +5,9 @@ Palm's native forms through PACE. PNG decoding, vector rendering and
 coordinate projection run in an ARMv4T ARMlet. Fixed Graffiti areas and
 Palm OS dynamic input areas both work.
 
-Install `Map.prc` and `PalmTLSArm-Modern.prc` with HotSync, from a card, or in
-CloudpilotEmu. The release package includes both files. For source builds,
+The [latest release](https://github.com/palmsnipe/palm-map/releases/latest)
+includes `Map.prc` and `PalmTLSArm-Modern.prc`. Install both with HotSync,
+from a card, or in CloudpilotEmu. For source builds,
 build Map and fetch PalmTLS as described below. Open **Map**. Drag with the stylus,
 pan with the directional buttons, or use
 **+** and **−** in the lower right of the map to change zoom. **Map → Find**
@@ -125,9 +126,9 @@ Map on pushes to `main` and on manual runs. Pushing a tag such as `v0.2.8`
 also creates a draft GitHub release. Match the tag to the version in
 `resources/app.rcp` and add release notes under `docs/releases/` before tagging.
 
-The build uses the private Palm Toolchain SDK container. Grant the repository
-**Read** under the container package's **Manage Actions access**, or configure
-a read-only registry credential as `PALM_TOOLCHAIN_REGISTRY_TOKEN`.
+The build uses the private Palm Toolchain SDK container. Maintainers configure
+a read-only registry credential as the `PALM_TOOLCHAIN_REGISTRY_TOKEN`
+Actions secret for the trusted build workflow.
 
 To create the same download set locally, run `make test`,
 `tools/fetch-palmtls.sh`, and `python3 tools/package-release.py` from a clean

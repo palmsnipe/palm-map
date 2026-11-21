@@ -14,14 +14,11 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-      packages: read
     container:
       image: ghcr.io/palmsnipe/palm-toolchain-sdk@sha256:2c441bfa432785cf90e34fb5f4efe241c07a9e3666ee475119d856f96db3299f
       credentials:
         username: palmsnipe
-        password: ${{ secrets.PALM_TOOLCHAIN_REGISTRY_TOKEN || github.token }}
+        password: ${{ secrets.PALM_TOOLCHAIN_REGISTRY_TOKEN }}
 
     steps:
       - name: Check out Map
